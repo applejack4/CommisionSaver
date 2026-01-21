@@ -23,6 +23,29 @@ async function findById(id) {
   });
 }
 
+/**
+ * Find all routes
+ * @returns {Promise<Array>} Array of route objects
+ */
+async function findAll() {
+  const db = await getDatabase();
+  
+  return new Promise((resolve, reject) => {
+    db.all(
+      'SELECT * FROM routes ORDER BY id ASC',
+      [],
+      (err, rows) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(rows || []);
+      }
+    );
+  });
+}
+
 module.exports = {
-  findById
+  findById,
+  findAll
 };

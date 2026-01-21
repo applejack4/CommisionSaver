@@ -135,38 +135,47 @@ router.post('/create', async (req, res) => {
     // Get route details for notification
     const routeDetails = await routeModel.findById(route.id);
     
-    // Send notification to operator
-    const operatorMessage = `New Booking Request!\n\n` +
-      `Booking ID: ${booking.id}\n` +
-      `Customer: ${customer_phone}\n` +
-      `Route: ${routeDetails.source} → ${routeDetails.destination}\n` +
-      `Date: ${journeyDate}\n` +
-      `Time: ${routeDetails.departure_time}\n` +
-      `Seats: ${booking.seat_count}\n` +
-      `Price: ₹${routeDetails.price}\n\n` +
-      `Reply YES to confirm or NO to reject.`;
+    // Send notification to operator (optional - don't fail if WhatsApp is not configured)
+    try {
+      const operatorMessage = `New Booking Request!\n\n` +
+        `Booking ID: ${booking.id}\n` +
+        `Customer: ${customer_phone}\n` +
+        `Route: ${routeDetails.source} → ${routeDetails.destination}\n` +
+        `Date: ${journeyDate}\n` +
+        `Time: ${routeDetails.departure_time}\n` +
+        `Seats: ${booking.seat_count}\n` +
+        `Price: ₹${routeDetails.price}\n\n` +
+        `Reply YES to confirm or NO to reject.`;
 
-    await whatsappService.sendMessage(operator.phone_number, operatorMessage);
-    
-    // Log notification message
-    await messageLogModel.create({
-      booking_id: booking.id,
-      type: 'notification'
-    });
+      await whatsappService.sendMessage(operator.phone_number, operatorMessage);
+      
+      // Log notification message
+      await messageLogModel.create({
+        booking_id: booking.id,
+        type: 'notification'
+      });
+      
+      console.log(`Booking notification sent to operator`);
+    } catch (whatsappError) {
+      console.warn('WhatsApp notification to operator failed (booking still created):', whatsappError.message);
+    }
 
-    // Send confirmation to customer
-    const customerMessage = `Your booking request has been received!\n\n` +
-      `Booking ID: ${booking.id}\n` +
-      `Route: ${routeDetails.source} → ${routeDetails.destination}\n` +
-      `Date: ${journeyDate}\n` +
-      `Time: ${routeDetails.departure_time}\n` +
-      `Seats: ${booking.seat_count}\n` +
-      `Price: ₹${routeDetails.price}\n\n` +
-      `We will confirm your booking shortly.`;
+    // Send confirmation to customer (optional - don't fail if WhatsApp is not configured)
+    try {
+      const customerMessage = `Your booking request has been received!\n\n` +
+        `Booking ID: ${booking.id}\n` +
+        `Route: ${routeDetails.source} → ${routeDetails.destination}\n` +
+        `Date: ${journeyDate}\n` +
+        `Time: ${routeDetails.departure_time}\n` +
+        `Seats: ${booking.seat_count}\n` +
+        `Price: ₹${routeDetails.price}\n\n` +
+        `We will confirm your booking shortly.`;
 
-    await whatsappService.sendMessage(customer_phone, customerMessage);
-    
-    console.log(`Booking notification sent to operator and customer`);
+      await whatsappService.sendMessage(customer_phone, customerMessage);
+      console.log(`Booking acknowledgment sent to customer`);
+    } catch (whatsappError) {
+      console.warn('WhatsApp acknowledgment to customer failed (booking still created):', whatsappError.message);
+    }
 
     res.status(201).json({
       success: true,
@@ -232,33 +241,41 @@ router.post('/confirm', async (req, res) => {
       });
     }
 
-    // Send confirmation to customer
-    const customerMessage = `✅ Your booking has been confirmed!\n\n` +
-      `Booking ID: ${booking.id}\n` +
-      `Route: ${route.source} → ${route.destination}\n` +
-      `Date: ${booking.journey_date}\n` +
-      `Time: ${route.departure_time}\n` +
-      `Seats: ${booking.seat_count}\n` +
-      `Price: ₹${route.price}\n\n` +
-      `Thank you for choosing us!`;
+    // Send confirmation to customer (optional - don't fail if WhatsApp is not configured)
+    try {
+      const customerMessage = `✅ Your booking has been confirmed!\n\n` +
+        `Booking ID: ${booking.id}\n` +
+        `Route: ${route.source} → ${route.destination}\n` +
+        `Date: ${booking.journey_date}\n` +
+        `Time: ${route.departure_time}\n` +
+        `Seats: ${booking.seat_count}\n` +
+        `Price: ₹${route.price}\n\n` +
+        `Thank you for choosing us!`;
 
-    await whatsappService.sendMessage(booking.customer_phone, customerMessage);
-    
-    // Log confirmation message
-    await messageLogModel.create({
-      booking_id: booking.id,
-      type: 'confirmation'
-    });
-
-    // Notify operator if phone number provided
-    if (operator_phone) {
-      await whatsappService.sendMessage(
-        operator_phone,
-        `Booking ${booking.id} has been confirmed and customer has been notified.`
-      );
+      await whatsappService.sendMessage(booking.customer_phone, customerMessage);
+      
+      // Log confirmation message
+      await messageLogModel.create({
+        booking_id: booking.id,
+        type: 'confirmation'
+      });
+      
+      console.log(`Booking confirmation sent to customer ${booking.customer_phone}`);
+    } catch (whatsappError) {
+      console.warn('WhatsApp confirmation to customer failed (booking still confirmed):', whatsappError.message);
     }
 
-    console.log(`Booking confirmation sent to customer ${booking.customer_phone}`);
+    // Notify operator if phone number provided (optional - don't fail if WhatsApp is not configured)
+    if (operator_phone) {
+      try {
+        await whatsappService.sendMessage(
+          operator_phone,
+          `Booking ${booking.id} has been confirmed and customer has been notified.`
+        );
+      } catch (whatsappError) {
+        console.warn('WhatsApp notification to operator failed:', whatsappError.message);
+      }
+    }
 
     res.status(200).json({
       success: true,
@@ -324,30 +341,38 @@ router.post('/reject', async (req, res) => {
       });
     }
 
-    // Send rejection to customer
-    const customerMessage = `❌ Your booking request has been rejected.\n\n` +
-      `Booking ID: ${booking.id}\n` +
-      `Route: ${route.source} → ${route.destination}\n` +
-      `Date: ${booking.journey_date}\n\n` +
-      `We apologize for the inconvenience. Please contact us for alternative options.`;
+    // Send rejection to customer (optional - don't fail if WhatsApp is not configured)
+    try {
+      const customerMessage = `❌ Your booking request has been rejected.\n\n` +
+        `Booking ID: ${booking.id}\n` +
+        `Route: ${route.source} → ${route.destination}\n` +
+        `Date: ${booking.journey_date}\n\n` +
+        `We apologize for the inconvenience. Please contact us for alternative options.`;
 
-    await whatsappService.sendMessage(booking.customer_phone, customerMessage);
-    
-    // Log rejection message
-    await messageLogModel.create({
-      booking_id: booking.id,
-      type: 'rejection'
-    });
-
-    // Notify operator if phone number provided
-    if (operator_phone) {
-      await whatsappService.sendMessage(
-        operator_phone,
-        `Booking ${booking.id} has been rejected and customer has been notified.`
-      );
+      await whatsappService.sendMessage(booking.customer_phone, customerMessage);
+      
+      // Log rejection message
+      await messageLogModel.create({
+        booking_id: booking.id,
+        type: 'rejection'
+      });
+      
+      console.log(`Booking rejection sent to customer ${booking.customer_phone}`);
+    } catch (whatsappError) {
+      console.warn('WhatsApp rejection to customer failed (booking still rejected):', whatsappError.message);
     }
 
-    console.log(`Booking rejection sent to customer ${booking.customer_phone}`);
+    // Notify operator if phone number provided (optional - don't fail if WhatsApp is not configured)
+    if (operator_phone) {
+      try {
+        await whatsappService.sendMessage(
+          operator_phone,
+          `Booking ${booking.id} has been rejected and customer has been notified.`
+        );
+      } catch (whatsappError) {
+        console.warn('WhatsApp notification to operator failed:', whatsappError.message);
+      }
+    }
 
     res.status(200).json({
       success: true,

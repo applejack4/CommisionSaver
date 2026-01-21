@@ -47,14 +47,13 @@ function initializeDatabase() {
         }
         console.log('Operators table created/verified');
 
-        // Routes table
+        // Routes table (base route definitions)
         db.run(`
           CREATE TABLE IF NOT EXISTS routes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             operator_id INTEGER NOT NULL,
             source TEXT NOT NULL,
             destination TEXT NOT NULL,
-            departure_time TEXT NOT NULL,
             price REAL NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (operator_id) REFERENCES operators(id) ON DELETE CASCADE
@@ -67,54 +66,97 @@ function initializeDatabase() {
           }
           console.log('Routes table created/verified');
 
-          // Bookings table
+          // Trips table (route + date + time + seat quota)
           db.run(`
-            CREATE TABLE IF NOT EXISTS bookings (
+            CREATE TABLE IF NOT EXISTS trips (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
-              customer_name TEXT,
-              customer_phone TEXT NOT NULL,
               route_id INTEGER NOT NULL,
               journey_date DATE NOT NULL,
-              seat_count INTEGER NOT NULL DEFAULT 1,
-              status TEXT NOT NULL DEFAULT 'pending',
+              departure_time TEXT NOT NULL,
+              whatsapp_seat_quota INTEGER NOT NULL DEFAULT 0,
               created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-              FOREIGN KEY (route_id) REFERENCES routes(id) ON DELETE CASCADE
+              FOREIGN KEY (route_id) REFERENCES routes(id) ON DELETE CASCADE,
+              UNIQUE(route_id, journey_date, departure_time)
             )
           `, (err) => {
             if (err) {
-              console.error('Error creating bookings table:', err.message);
+              console.error('Error creating trips table:', err.message);
               reject(err);
               return;
             }
-            console.log('Bookings table created/verified');
+            console.log('Trips table created/verified');
 
-            // Message logs table
+            // Bookings table (updated with trip_id and HOLD/EXPIRED status)
             db.run(`
-              CREATE TABLE IF NOT EXISTS message_logs (
+              CREATE TABLE IF NOT EXISTS bookings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                booking_id INTEGER,
-                type TEXT NOT NULL,
-                sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE CASCADE
+                customer_name TEXT,
+                customer_phone TEXT NOT NULL,
+                trip_id INTEGER NOT NULL,
+                seat_count INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'hold',
+                hold_expires_at DATETIME,
+                ticket_attachment_id TEXT,
+                ticket_received_at DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE
               )
             `, (err) => {
               if (err) {
-                console.error('Error creating message_logs table:', err.message);
+                console.error('Error creating bookings table:', err.message);
                 reject(err);
                 return;
               }
-              console.log('Message logs table created/verified');
+              console.log('Bookings table created/verified');
 
-              // Seed default data after all tables are created
-              seedDefaultData(db)
-                .then(() => {
-                  console.log('Database initialization complete');
-                  resolve(db);
-                })
-                .catch((err) => {
-                  console.error('Error seeding default data:', err.message);
+              // Message logs table
+              db.run(`
+                CREATE TABLE IF NOT EXISTS message_logs (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  booking_id INTEGER,
+                  type TEXT NOT NULL,
+                  sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE CASCADE
+                )
+              `, (err) => {
+                if (err) {
+                  console.error('Error creating message_logs table:', err.message);
                   reject(err);
+                  return;
+                }
+                console.log('Message logs table created/verified');
+
+                // Ticket attachments table (store WhatsApp media IDs)
+                db.run(`
+                  CREATE TABLE IF NOT EXISTS ticket_attachments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    booking_id INTEGER NOT NULL,
+                    media_id TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    media_url TEXT,
+                    received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE CASCADE
+                  )
+                `, (err) => {
+                  if (err) {
+                    console.error('Error creating ticket_attachments table:', err.message);
+                    reject(err);
+                    return;
+                  }
+                  console.log('Ticket attachments table created/verified');
+
+                  // Seed default data after all tables are created
+                  seedDefaultData(db)
+                    .then(() => {
+                      console.log('Database initialization complete');
+                      resolve(db);
+                    })
+                    .catch((err) => {
+                      console.error('Error seeding default data:', err.message);
+                      reject(err);
+                    });
                 });
+              });
             });
           });
         });
@@ -159,26 +201,47 @@ function seedDefaultData(db) {
           const operatorId = this.lastID;
           console.log(`Default operator created with ID: ${operatorId}`);
 
-          // Insert default route
+          // Insert default route (without departure_time, now in trips)
           const defaultRoute = {
             source: 'City A',
             destination: 'City B',
-            departureTime: '08:00',
             price: 500.00
           };
 
           db.run(
-            'INSERT INTO routes (operator_id, source, destination, departure_time, price) VALUES (?, ?, ?, ?, ?)',
-            [operatorId, defaultRoute.source, defaultRoute.destination, defaultRoute.departureTime, defaultRoute.price],
+            'INSERT INTO routes (operator_id, source, destination, price) VALUES (?, ?, ?, ?)',
+            [operatorId, defaultRoute.source, defaultRoute.destination, defaultRoute.price],
             function (err) {
               if (err) {
                 reject(err);
                 return;
               }
 
-              console.log(`Default route created with ID: ${this.lastID}`);
-              console.log(`Route: ${defaultRoute.source} → ${defaultRoute.destination}, ${defaultRoute.departureTime}, ₹${defaultRoute.price}`);
-              resolve();
+              const routeId = this.lastID;
+              console.log(`Default route created with ID: ${routeId}`);
+              console.log(`Route: ${defaultRoute.source} → ${defaultRoute.destination}, ₹${defaultRoute.price}`);
+
+              // Create a default trip for tomorrow
+              const tomorrow = new Date();
+              tomorrow.setDate(tomorrow.getDate() + 1);
+              const journeyDate = tomorrow.toISOString().split('T')[0];
+              const departureTime = '08:00';
+              const seatQuota = 5;
+
+              db.run(
+                'INSERT INTO trips (route_id, journey_date, departure_time, whatsapp_seat_quota) VALUES (?, ?, ?, ?)',
+                [routeId, journeyDate, departureTime, seatQuota],
+                function (err) {
+                  if (err) {
+                    reject(err);
+                    return;
+                  }
+
+                  console.log(`Default trip created with ID: ${this.lastID}`);
+                  console.log(`Trip: ${journeyDate} at ${departureTime}, WhatsApp quota: ${seatQuota} seats`);
+                  resolve();
+                }
+              );
             }
           );
         }
