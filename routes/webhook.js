@@ -75,12 +75,20 @@ router.get('/whatsapp/webhook', (req, res) => {
 router.post('/whatsapp/webhook', async (req, res) => {
   try {
     // Always return 200 to WhatsApp to avoid retries
+    console.log("🔥 WEBHOOK HIT");
+    console.log("Webhook payload:", JSON.stringify(req.body, null, 2));
     res.status(200).send('OK');
 
     const body = req.body;
     
     if (!body.entry || !body.entry[0] || !body.entry[0].changes || !body.entry[0].changes[0]) {
       console.log('Invalid webhook payload structure');
+      console.log('Body structure:', {
+        hasEntry: !!body.entry,
+        entryLength: body.entry?.length,
+        hasChanges: !!body.entry?.[0]?.changes,
+        changesLength: body.entry?.[0]?.changes?.length
+      });
       return;
     }
 
@@ -93,28 +101,52 @@ router.post('/whatsapp/webhook', async (req, res) => {
       const messageType = message.type;
       const normalizedFrom = normalizePhoneNumber(from);
 
-      console.log(`Received ${messageType} message from ${normalizedFrom}`);
+      console.log(`Received ${messageType} message from ${normalizedFrom} (original: ${from})`);
 
       // Identify sender: operator or customer
-      const operator = await operatorModel.findByPhone(normalizedFrom);
-      
-      if (operator) {
-        // Operator message handling
-        await handleOperatorMessage(normalizedFrom, message, messageType);
-      } else {
-        // Customer message handling
-        if (messageType === 'text') {
-          const messageText = message.text?.body || '';
-          await handleCustomerMessage(normalizedFrom, messageText);
+      try {
+        const operator = await operatorModel.findByPhone(normalizedFrom);
+        
+        if (operator) {
+          console.log(`Identified as operator: ${operator.name} (ID: ${operator.id})`);
+          // Operator message handling
+          await handleOperatorMessage(normalizedFrom, message, messageType);
         } else {
-          console.log(`Customer ${normalizedFrom} sent non-text message, ignoring`);
+          console.log(`Identified as customer: ${normalizedFrom}`);
+          // Customer message handling
+          if (messageType === 'text') {
+            const messageText = message.text?.body || '';
+            console.log(`Customer message text: "${messageText}"`);
+            await handleCustomerMessage(normalizedFrom, messageText);
+          } else {
+            console.log(`Customer ${normalizedFrom} sent non-text message (${messageType}), ignoring`);
+          }
+        }
+      } catch (handlerError) {
+        console.error('Error in message handler:', handlerError);
+        console.error('Stack trace:', handlerError.stack);
+        // Try to send error notification to user
+        try {
+          await whatsappService.sendMessage(
+            normalizedFrom,
+            'Sorry, there was an error processing your message. Please try again later.'
+          );
+        } catch (notifyError) {
+          console.error('Failed to send error notification:', notifyError.message);
         }
       }
     } else {
       console.log('No messages in webhook payload');
+      console.log('Change value:', JSON.stringify(change.value, null, 2));
     }
   } catch (error) {
     console.error('Error processing webhook:', error);
+    console.error('Error stack:', error.stack);
+    console.error('Error details:', {
+      message: error.message,
+      name: error.name,
+      code: error.code
+    });
   }
 });
 
@@ -124,32 +156,45 @@ router.post('/whatsapp/webhook', async (req, res) => {
  * @param {string} messageText - Message text
  */
 async function handleCustomerMessage(phoneNumber, messageText) {
+  console.log(`[handleCustomerMessage] Processing message from ${phoneNumber}: "${messageText}"`);
   const upperText = messageText.toUpperCase().trim();
   
   // Check for help request
   if (upperText === 'HELP' || upperText === '?' || upperText.startsWith('HOW')) {
+    console.log(`[handleCustomerMessage] Help request detected from ${phoneNumber}`);
     try {
-      await whatsappService.sendMessage(phoneNumber, getHelpMessage());
+      const helpMsg = getHelpMessage();
+      console.log(`[handleCustomerMessage] Sending help message to ${phoneNumber}`);
+      await whatsappService.sendMessage(phoneNumber, helpMsg);
+      console.log(`[handleCustomerMessage] Help message sent successfully to ${phoneNumber}`);
     } catch (error) {
-      console.error('Failed to send help message:', error.message);
+      console.error(`[handleCustomerMessage] Failed to send help message to ${phoneNumber}:`, error.message);
+      console.error('Error stack:', error.stack);
+      throw error; // Re-throw to be caught by outer handler
     }
     return;
   }
 
   // Parse booking request
+  console.log(`[handleCustomerMessage] Parsing booking request from ${phoneNumber}`);
   const bookingRequest = parseBookingRequest(messageText);
   
   if (!bookingRequest) {
+    console.log(`[handleCustomerMessage] Could not parse booking request from ${phoneNumber}`);
     try {
-      await whatsappService.sendMessage(
-        phoneNumber,
-        `I couldn't understand your booking request. Please use this format:\n\n${getHelpMessage()}`
-      );
+      const errorMsg = `I couldn't understand your booking request. Please use this format:\n\n${getHelpMessage()}`;
+      console.log(`[handleCustomerMessage] Sending parse error message to ${phoneNumber}`);
+      await whatsappService.sendMessage(phoneNumber, errorMsg);
+      console.log(`[handleCustomerMessage] Parse error message sent successfully to ${phoneNumber}`);
     } catch (error) {
-      console.error('Failed to send error message:', error.message);
+      console.error(`[handleCustomerMessage] Failed to send error message to ${phoneNumber}:`, error.message);
+      console.error('Error stack:', error.stack);
+      throw error;
     }
     return;
   }
+  
+  console.log(`[handleCustomerMessage] Parsed booking request:`, bookingRequest);
 
   // Validate parsed data
   if (!bookingRequest.source || !bookingRequest.destination || 
@@ -304,6 +349,8 @@ async function handleCustomerMessage(phoneNumber, messageText) {
  * @param {string} messageType - Message type (text, image, document, etc.)
  */
 async function handleOperatorMessage(phoneNumber, message, messageType) {
+  console.log(`[handleOperatorMessage] Processing ${messageType} message from operator ${phoneNumber}`);
+  
   // Check if operator sent a ticket (image or document)
   if (messageType === 'image' || messageType === 'document') {
     const mediaId = message.image?.id || message.document?.id;
@@ -424,11 +471,62 @@ async function handleOperatorMessage(phoneNumber, message, messageType) {
       }
     }
   } else if (messageType === 'text') {
-    // Operator sent text - could be commands or just communication
+    // Operator sent text - send acknowledgment
     const messageText = message.text?.body || '';
-    console.log(`Operator ${phoneNumber} sent text: ${messageText}`);
-    // For now, we don't process operator text commands
-    // This could be extended for manual confirmation/rejection if needed
+    console.log(`[handleOperatorMessage] Operator ${phoneNumber} sent text: "${messageText}"`);
+    
+    // #region agent log
+    try {
+      if (typeof fetch !== 'undefined') {
+        fetch('http://127.0.0.1:7242/ingest/2e5d7a8b-2c31-4c53-bec6-7fab2ceda2df',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'webhook.js:430',message:'Attempting to send acknowledgment to operator',data:{phoneNumber:phoneNumber,messageText:messageText.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
+      }
+    } catch (fetchError) {
+      // Ignore fetch errors
+    }
+    // #endregion
+    
+    try {
+      console.log(`[handleOperatorMessage] Sending acknowledgment to operator ${phoneNumber}`);
+      const result = await whatsappService.sendMessage(
+        phoneNumber,
+        '✅ Message received. Your message has been acknowledged.'
+      );
+      // #region agent log
+      try {
+        if (typeof fetch !== 'undefined') {
+          fetch('http://127.0.0.1:7242/ingest/2e5d7a8b-2c31-4c53-bec6-7fab2ceda2df',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'webhook.js:437',message:'Acknowledgment sent successfully',data:{phoneNumber:phoneNumber,result:result},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
+        }
+      } catch (fetchError) {
+        // Ignore fetch errors
+      }
+      // #endregion
+      console.log(`[handleOperatorMessage] Acknowledgment sent successfully to operator ${phoneNumber}`, result);
+    } catch (error) {
+      // #region agent log
+      try {
+        if (typeof fetch !== 'undefined') {
+          fetch('http://127.0.0.1:7242/ingest/2e5d7a8b-2c31-4c53-bec6-7fab2ceda2df',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'webhook.js:442',message:'Failed to send acknowledgment',data:{phoneNumber:phoneNumber,errorMessage:error.message,errorStack:error.stack?error.stack.substring(0,300):null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
+        }
+      } catch (fetchError) {
+        // Ignore fetch errors
+      }
+      // #endregion
+      console.error(`[handleOperatorMessage] Failed to send acknowledgment to operator ${phoneNumber}:`, error.message);
+      console.error('Error stack:', error.stack);
+      throw error; // Re-throw to be caught by outer handler
+    }
+  } else {
+    // Operator sent other message type (audio, video, etc.)
+    console.log(`Operator ${phoneNumber} sent ${messageType} message`);
+    
+    try {
+      await whatsappService.sendMessage(
+        phoneNumber,
+        '✅ Message received. Your message has been acknowledged.'
+      );
+    } catch (error) {
+      console.error('Failed to send acknowledgment to operator:', error.message);
+    }
   }
 }
 

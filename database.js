@@ -145,14 +145,18 @@ function initializeDatabase() {
                   }
                   console.log('Ticket attachments table created/verified');
 
-                  // Seed default data after all tables are created
-                  seedDefaultData(db)
+                  // Run migrations after all tables are created
+                  runMigrations(db)
+                    .then(() => {
+                      // Seed default data after migrations
+                      return seedDefaultData(db);
+                    })
                     .then(() => {
                       console.log('Database initialization complete');
                       resolve(db);
                     })
                     .catch((err) => {
-                      console.error('Error seeding default data:', err.message);
+                      console.error('Error initializing database:', err.message);
                       reject(err);
                     });
                 });
@@ -166,32 +170,130 @@ function initializeDatabase() {
 }
 
 /**
+ * Run database migrations to add missing columns
+ * @param {sqlite3.Database} db Database instance
+ * @returns {Promise<void>}
+ */
+function runMigrations(db) {
+  return new Promise((resolve, reject) => {
+    // First, check the current schema
+    db.all("PRAGMA table_info(bookings)", (err, rows) => {
+      if (err) {
+        console.error('Error checking bookings table structure:', err.message);
+        resolve(); // Continue anyway
+        return;
+      }
+
+      // Handle case where rows might be undefined or empty
+      if (!rows || !Array.isArray(rows)) {
+        rows = [];
+      }
+
+      const columnNames = rows.map(row => row.name);
+      const hasTripId = columnNames.includes('trip_id');
+      const hasRouteId = columnNames.includes('route_id');
+      const hasHoldExpiresAt = columnNames.includes('hold_expires_at');
+      const hasTicketAttachmentId = columnNames.includes('ticket_attachment_id');
+      const hasTicketReceivedAt = columnNames.includes('ticket_received_at');
+
+      db.serialize(() => {
+        // Migration: Add trip_id column if it doesn't exist
+        if (!hasTripId) {
+          db.run(`
+            ALTER TABLE bookings 
+            ADD COLUMN trip_id INTEGER
+          `, (err) => {
+            if (err) {
+              console.error('Error adding trip_id column:', err.message);
+            } else {
+              console.log('Added trip_id column to bookings table');
+            }
+          });
+        }
+
+        // Migration: Add hold_expires_at column to bookings if it doesn't exist
+        if (!hasHoldExpiresAt) {
+          db.run(`
+            ALTER TABLE bookings 
+            ADD COLUMN hold_expires_at DATETIME
+          `, (err) => {
+            if (err) {
+              console.error('Error adding hold_expires_at column:', err.message);
+            } else {
+              console.log('Added hold_expires_at column to bookings table');
+            }
+          });
+        }
+
+        // Migration: Add ticket_attachment_id column to bookings if it doesn't exist
+        if (!hasTicketAttachmentId) {
+          db.run(`
+            ALTER TABLE bookings 
+            ADD COLUMN ticket_attachment_id TEXT
+          `, (err) => {
+            if (err) {
+              console.error('Error adding ticket_attachment_id column:', err.message);
+            } else {
+              console.log('Added ticket_attachment_id column to bookings table');
+            }
+          });
+        }
+
+        // Migration: Add ticket_received_at column to bookings if it doesn't exist
+        if (!hasTicketReceivedAt) {
+          db.run(`
+            ALTER TABLE bookings 
+            ADD COLUMN ticket_received_at DATETIME
+          `, (err) => {
+            if (err) {
+              console.error('Error adding ticket_received_at column:', err.message);
+            } else {
+              console.log('Added ticket_received_at column to bookings table');
+            }
+            resolve(); // Resolve after all migrations
+          });
+        } else {
+          resolve(); // All columns already exist
+        }
+      });
+    });
+  });
+}
+
+/**
  * Seed default operator and route data
  * @param {sqlite3.Database} db Database instance
  * @returns {Promise<void>}
  */
 function seedDefaultData(db) {
   return new Promise((resolve, reject) => {
-    // Check if default operator already exists
-    db.get('SELECT id FROM operators WHERE phone_number = ?', [process.env.OPERATOR_PHONE || '1234567890'], (err, row) => {
+    // Normalize phone number function
+    function normalizePhoneNumber(phoneNumber) {
+      return phoneNumber.replace(/[\s+\-()]/g, '');
+    }
+
+    // Get and normalize operator phone
+    const operatorPhone = process.env.OPERATOR_PHONE || '1234567890';
+    const normalizedPhone = normalizePhoneNumber(operatorPhone);
+    const operatorName = process.env.OPERATOR_NAME || 'Default Operator';
+
+    // Check if default operator already exists (using normalized phone)
+    db.get('SELECT id FROM operators WHERE phone_number = ?', [normalizedPhone], (err, row) => {
       if (err) {
         reject(err);
         return;
       }
 
       if (row) {
-        console.log('Default data already exists, skipping seed');
+        console.log(`Default operator already exists (ID: ${row.id}), skipping seed`);
         resolve();
         return;
       }
 
-      // Insert default operator
-      const operatorPhone = process.env.OPERATOR_PHONE || '1234567890';
-      const operatorName = process.env.OPERATOR_NAME || 'Default Operator';
-
+      // Insert default operator with normalized phone number
       db.run(
         'INSERT INTO operators (name, phone_number, approved) VALUES (?, ?, ?)',
-        [operatorName, operatorPhone, 1],
+        [operatorName, normalizedPhone, 1],
         function (err) {
           if (err) {
             reject(err);

@@ -2,6 +2,8 @@ const express = require('express');
 const cron = require('node-cron');
 const dotenv = require('dotenv');
 
+dotenv.config();
+
 const { initializeDatabase } = require('./database');
 const webhookRoutes = require('./routes/webhook');
 const bookingRoutes = require('./routes/booking');
@@ -9,8 +11,6 @@ const tripRoutes = require('./routes/trip');
 const routesRoutes = require('./routes/routes');
 const { sendReminders } = require('./services/reminder');
 const { expireHolds } = require('./services/holdExpiration');
-
-dotenv.config();
 
 const app = express();
 const path = require('path');
