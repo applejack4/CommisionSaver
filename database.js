@@ -145,20 +145,64 @@ function initializeDatabase() {
                   }
                   console.log('Ticket attachments table created/verified');
 
-                  // Run migrations after all tables are created
-                  runMigrations(db)
-                    .then(() => {
-                      // Seed default data after migrations
-                      return seedDefaultData(db);
-                    })
-                    .then(() => {
-                      console.log('Database initialization complete');
-                      resolve(db);
-                    })
-                    .catch((err) => {
-                      console.error('Error initializing database:', err.message);
+                  // Operator takeovers table
+                  db.run(`
+                    CREATE TABLE IF NOT EXISTS operator_takeovers (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      session_id TEXT NOT NULL,
+                      booking_id INTEGER,
+                      operator_id TEXT NOT NULL,
+                      status TEXT NOT NULL,
+                      reason TEXT,
+                      started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                      ended_at DATETIME,
+                      FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE SET NULL
+                    )
+                  `, (err) => {
+                    if (err) {
+                      console.error('Error creating operator_takeovers table:', err.message);
                       reject(err);
+                      return;
+                    }
+                    console.log('Operator takeovers table created/verified');
+
+                    // Audit events table (append-only)
+                    db.run(`
+                      CREATE TABLE IF NOT EXISTS audit_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_type TEXT NOT NULL,
+                        session_id TEXT,
+                        operator_id TEXT,
+                        takeover_id INTEGER,
+                        idempotency_key TEXT,
+                        payload TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (takeover_id) REFERENCES operator_takeovers(id) ON DELETE SET NULL
+                      )
+                    `, (err) => {
+                      if (err) {
+                        console.error('Error creating audit_events table:', err.message);
+                        reject(err);
+                        return;
+                      }
+                      console.log('Audit events table created/verified');
+
+                      // Run migrations after all tables are created
+                      runMigrations(db)
+                        .then(() => {
+                          // Seed default data after migrations
+                          return seedDefaultData(db);
+                        })
+                        .then(() => {
+                          console.log('Database initialization complete');
+                          resolve(db);
+                        })
+                        .catch((err) => {
+                          console.error('Error initializing database:', err.message);
+                          reject(err);
+                        });
                     });
+                  });
                 });
               });
             });

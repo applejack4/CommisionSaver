@@ -247,6 +247,106 @@
             padding: 20px;
             color: #666;
         }
+
+        .sessions-layout {
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 20px;
+        }
+
+        .session-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .session-item {
+            border: 1px solid #e5e5e5;
+            border-radius: 8px;
+            padding: 12px;
+            background: white;
+            cursor: pointer;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .session-item:hover {
+            border-color: #cbd5f5;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        }
+
+        .session-item.active {
+            border-color: #2563eb;
+            box-shadow: 0 2px 6px rgba(37,99,235,0.2);
+        }
+
+        .session-meta {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: #666;
+            margin-top: 6px;
+        }
+
+        .session-detail {
+            border: 1px solid #e5e5e5;
+            border-radius: 8px;
+            padding: 15px;
+            background: white;
+        }
+
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .detail-item {
+            background: #f9fafb;
+            border-radius: 6px;
+            padding: 8px 10px;
+            font-size: 13px;
+        }
+
+        .message-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .message-item {
+            border-radius: 8px;
+            padding: 8px 10px;
+            max-width: 80%;
+            font-size: 13px;
+        }
+
+        .message-inbound {
+            background: #f1f5f9;
+            align-self: flex-start;
+        }
+
+        .message-outbound {
+            background: #dbeafe;
+            align-self: flex-end;
+        }
+
+        .pill {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 11px;
+            background: #e2e8f0;
+            color: #334155;
+            text-transform: uppercase;
+        }
+
+        @media (max-width: 900px) {
+            .sessions-layout {
+                grid-template-columns: 1fr;
+            }
+        }
     </style>
 </head>
 <body>
@@ -257,11 +357,36 @@
         </header>
 
         <div class="tabs">
-            <button class="tab active" onclick="showTab('trips')">Trips</button>
-            <button class="tab" onclick="showTab('create')">Create Trip</button>
+            <button class="tab active" data-tab="sessions" onclick="showTab('sessions', event)">Sessions</button>
+            <button class="tab" data-tab="trips" onclick="showTab('trips', event)">Trips</button>
+            <button class="tab" data-tab="create" onclick="showTab('create', event)">Create Trip</button>
         </div>
 
-        <div id="trips" class="tab-content active">
+        <div id="sessions" class="tab-content active">
+            <div class="card">
+                <h2>WhatsApp Sessions</h2>
+                <div class="form-group" style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <input type="text" id="session-search" placeholder="Search by phone or name">
+                    <select id="session-status">
+                        <option value="">All statuses</option>
+                        <option value="active">Active</option>
+                        <option value="needs_attention">Needs attention</option>
+                        <option value="closed">Closed</option>
+                    </select>
+                    <button type="button" onclick="loadSessions()">Refresh</button>
+                </div>
+                <div class="sessions-layout">
+                    <div id="sessions-list" class="session-list">
+                        <div class="loading">Loading sessions...</div>
+                    </div>
+                    <div id="session-detail" class="session-detail">
+                        <div class="loading">Select a session to view details.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="trips" class="tab-content">
             <div class="card">
                 <h2>Upcoming Trips</h2>
                 <div id="trips-list" class="trip-list">
@@ -301,15 +426,378 @@
 
     <script>
         const API_BASE = window.location.origin;
+        const POLL_INTERVALS = {
+            sessions: 20000,
+            sessionDetail: 12000,
+            messages: 5000,
+            booking: 20000
+        };
+        const state = {
+            activeTab: 'sessions',
+            currentSessionId: null,
+            currentBookingId: null,
+            sessionsPoll: null,
+            sessionDetailPoll: null,
+            messagesPoll: null,
+            bookingPoll: null
+        };
 
         // Set default date to tomorrow
         document.getElementById('journey-date').valueAsDate = new Date(Date.now() + 86400000);
 
         function showTab(tabName) {
             document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
-            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
             document.getElementById(tabName).classList.add('active');
-            event.target.classList.add('active');
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.toggle('active', tab.dataset.tab === tabName);
+            });
+            handleTabChange(tabName);
+        }
+
+        function handleTabChange(tabName) {
+            state.activeTab = tabName;
+            if (tabName === 'sessions') {
+                startSessionsListPolling();
+                if (state.currentSessionId) {
+                    startSessionPolling();
+                }
+            } else {
+                stopSessionsListPolling();
+                stopSessionPolling();
+            }
+        }
+
+        function renderLoading(element, message) {
+            element.innerHTML = `<div class="loading">${message}</div>`;
+        }
+
+        function renderError(element, message) {
+            element.innerHTML = `<div class="error">${message}</div>`;
+        }
+
+        function escapeHtml(value) {
+            if (value === null || value === undefined) return '';
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function formatDateTime(value) {
+            if (!value) return '—';
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return value;
+            return date.toLocaleString();
+        }
+
+        function formatCurrency(amount, currency) {
+            if (amount === null || amount === undefined) return '—';
+            try {
+                return new Intl.NumberFormat('en-IN', {
+                    style: 'currency',
+                    currency: currency || 'INR'
+                }).format(amount);
+            } catch (error) {
+                return `${amount} ${currency || ''}`.trim();
+            }
+        }
+
+        function normalizeBookingId(bookingId) {
+            if (!bookingId) return null;
+            if (typeof bookingId === 'string' && bookingId.startsWith('book_')) {
+                return bookingId.replace('book_', '');
+            }
+            return bookingId;
+        }
+
+        async function fetchJson(url) {
+            const response = await fetch(url);
+            let data = null;
+            try {
+                data = await response.json();
+            } catch (error) {
+                throw new Error('Invalid server response');
+            }
+            if (!response.ok || !data || data.success === false) {
+                throw new Error(data?.error || 'Request failed');
+            }
+            return data;
+        }
+
+        function highlightSelectedSession() {
+            const sessionItems = document.querySelectorAll('.session-item');
+            sessionItems.forEach(item => {
+                if (item.dataset.sessionId === state.currentSessionId) {
+                    item.classList.add('active');
+                } else {
+                    item.classList.remove('active');
+                }
+            });
+        }
+
+        async function loadSessions() {
+            const listElement = document.getElementById('sessions-list');
+            renderLoading(listElement, 'Loading sessions...');
+
+            const searchValue = document.getElementById('session-search').value.trim();
+            const statusValue = document.getElementById('session-status').value;
+            const url = new URL(`${API_BASE}/operator/sessions`);
+            url.searchParams.set('limit', '50');
+            if (searchValue) url.searchParams.set('search', searchValue);
+            if (statusValue) url.searchParams.set('status', statusValue);
+
+            try {
+                const data = await fetchJson(url.toString());
+                const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+
+                if (!sessions.length) {
+                    state.currentSessionId = null;
+                    state.currentBookingId = null;
+                    renderLoading(listElement, 'No sessions found.');
+                    clearSessionSelection();
+                    return;
+                }
+
+                listElement.innerHTML = sessions.map(session => {
+                    const displayName = session.customer_name
+                        ? `${session.customer_name} (${session.customer_phone || 'Unknown'})`
+                        : (session.customer_phone || 'Unknown customer');
+                    const requiresAction = session.requires_action ? 'Action required' : '';
+                    return `
+                        <div class="session-item" data-session-id="${escapeHtml(session.session_id)}" data-booking-id="${escapeHtml(session.booking_id || '')}">
+                            <strong>${escapeHtml(displayName)}</strong>
+                            <div style="font-size: 12px; color: #666; margin-top: 4px;">
+                                ${escapeHtml(session.last_message_excerpt || 'No recent messages')}
+                            </div>
+                            <div class="session-meta">
+                                <span>${formatDateTime(session.last_message_at)}</span>
+                                <span class="pill">${escapeHtml(session.conversation_state || 'UNKNOWN')}</span>
+                            </div>
+                            <div class="session-meta">
+                                <span>${escapeHtml(session.booking_state || 'No booking')}</span>
+                                <span>${escapeHtml(requiresAction)}</span>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+                if (!state.currentSessionId || !sessions.find(session => session.session_id === state.currentSessionId)) {
+                    selectSession(sessions[0].session_id, sessions[0].booking_id);
+                } else {
+                    highlightSelectedSession();
+                }
+            } catch (error) {
+                console.error('Error loading sessions:', error);
+                renderError(listElement, 'Error loading sessions. Please refresh.');
+            }
+        }
+
+        function selectSession(sessionId, bookingId) {
+            if (!sessionId) return;
+            state.currentSessionId = sessionId;
+            state.currentBookingId = bookingId || null;
+            highlightSelectedSession();
+            loadSessionDetail();
+            loadSessionMessages();
+            startSessionPolling();
+        }
+
+        function clearSessionSelection() {
+            state.currentSessionId = null;
+            state.currentBookingId = null;
+            stopSessionPolling();
+            highlightSelectedSession();
+            renderLoading(document.getElementById('session-detail'), 'Select a session to view details.');
+        }
+
+        function renderSessionDetail(data) {
+            const detailElement = document.getElementById('session-detail');
+            const session = data.session || {};
+            const booking = data.booking || null;
+            const payment = data.payment || null;
+
+            detailElement.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <h3>Session Detail</h3>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <span class="pill">${escapeHtml(session.takeover_status || 'UNKNOWN')}</span>
+                        <button type="button" onclick="clearSessionSelection()">Close</button>
+                    </div>
+                </div>
+                <div class="detail-grid" id="session-summary">
+                    <div class="detail-item"><strong>Session ID:</strong> ${escapeHtml(session.session_id || '—')}</div>
+                    <div class="detail-item"><strong>Customer:</strong> ${escapeHtml(session.customer_name || '—')}</div>
+                    <div class="detail-item"><strong>Phone:</strong> ${escapeHtml(session.customer_phone || '—')}</div>
+                    <div class="detail-item"><strong>State:</strong> ${escapeHtml(session.conversation_state || '—')}</div>
+                    <div class="detail-item"><strong>Last Msg:</strong> ${formatDateTime(session.last_message_at)}</div>
+                </div>
+
+                <h4 style="margin-top: 15px;">Booking Summary</h4>
+                ${booking ? `
+                    <div class="detail-grid" id="booking-summary">
+                        <div class="detail-item"><strong>Booking:</strong> ${escapeHtml(booking.booking_id || '—')}</div>
+                        <div class="detail-item"><strong>Status:</strong> ${escapeHtml(booking.booking_state || '—')}</div>
+                        <div class="detail-item"><strong>Seats:</strong> ${escapeHtml(booking.seat_count ?? '—')}</div>
+                        <div class="detail-item"><strong>Route:</strong> ${escapeHtml(booking.route_label || '—')}</div>
+                        <div class="detail-item"><strong>Date:</strong> ${escapeHtml(booking.journey_date || '—')}</div>
+                        <div class="detail-item"><strong>Time:</strong> ${escapeHtml(booking.departure_time || '—')}</div>
+                        <div class="detail-item"><strong>Price:</strong> ${formatCurrency(booking.price_amount, booking.price_currency)}</div>
+                        <div class="detail-item"><strong>Lock Expires:</strong> ${formatDateTime(booking.lock_expires_at)}</div>
+                    </div>
+                ` : '<div class="loading">No booking attached to this session.</div>'}
+
+                <h4 style="margin-top: 15px;">Payment Summary</h4>
+                ${payment ? `
+                    <div class="detail-grid" id="payment-summary">
+                        <div class="detail-item"><strong>Status:</strong> ${escapeHtml(payment.status || '—')}</div>
+                        <div class="detail-item"><strong>Gateway Ref:</strong> ${escapeHtml(payment.gateway_ref || '—')}</div>
+                        <div class="detail-item"><strong>Pay Link:</strong> ${payment.pay_link_url ? `<a href="${escapeHtml(payment.pay_link_url)}" target="_blank">Open</a>` : '—'}</div>
+                        <div class="detail-item"><strong>Link Expires:</strong> ${formatDateTime(payment.pay_link_expires_at)}</div>
+                        <div class="detail-item"><strong>Last Event:</strong> ${formatDateTime(payment.last_event_at)}</div>
+                    </div>
+                ` : '<div class="loading">No payment data.</div>'}
+
+                <h4 style="margin-top: 15px;">Full Booking Detail</h4>
+                <div id="booking-detail" class="detail-grid">
+                    <div class="loading">Loading booking detail...</div>
+                </div>
+
+                <h4 style="margin-top: 15px;">Messages</h4>
+                <div id="messages-list" class="message-list">
+                    <div class="loading">Loading messages...</div>
+                </div>
+            `;
+        }
+
+        async function loadSessionDetail() {
+            const sessionId = state.currentSessionId;
+            if (!sessionId) return;
+
+            const detailElement = document.getElementById('session-detail');
+            renderLoading(detailElement, 'Loading session details...');
+
+            try {
+                const data = await fetchJson(`${API_BASE}/operator/sessions/${encodeURIComponent(sessionId)}`);
+                renderSessionDetail(data);
+                const bookingId = data.booking?.booking_id || null;
+                if (bookingId && bookingId !== state.currentBookingId) {
+                    state.currentBookingId = bookingId;
+                }
+                loadSessionMessages();
+                if (state.currentBookingId) {
+                    loadBookingDetail(state.currentBookingId);
+                } else {
+                    const bookingDetail = document.getElementById('booking-detail');
+                    if (bookingDetail) {
+                        bookingDetail.innerHTML = '<div class="loading">No booking detail available.</div>';
+                    }
+                }
+            } catch (error) {
+                console.error('Error loading session detail:', error);
+                renderError(detailElement, 'Error loading session details.');
+            }
+        }
+
+        async function loadSessionMessages() {
+            const sessionId = state.currentSessionId;
+            if (!sessionId) return;
+
+            const messagesElement = document.getElementById('messages-list');
+            if (messagesElement) {
+                renderLoading(messagesElement, 'Loading messages...');
+            }
+
+            try {
+                const data = await fetchJson(`${API_BASE}/operator/sessions/${encodeURIComponent(sessionId)}/messages?limit=50`);
+                const messages = Array.isArray(data.messages) ? data.messages : [];
+                if (!messagesElement) return;
+                if (!messages.length) {
+                    messagesElement.innerHTML = '<div class="loading">No messages yet.</div>';
+                    return;
+                }
+                messagesElement.innerHTML = messages.map(message => `
+                    <div class="message-item ${message.direction === 'OUTBOUND' ? 'message-outbound' : 'message-inbound'}">
+                        <div>${escapeHtml(message.text || '[non-text message]')}</div>
+                        <div style="font-size: 11px; color: #64748b; margin-top: 4px;">
+                            ${formatDateTime(message.timestamp)} · ${escapeHtml(message.status || 'UNKNOWN')}
+                        </div>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Error loading session messages:', error);
+                if (messagesElement) {
+                    renderError(messagesElement, 'Error loading messages.');
+                }
+            }
+        }
+
+        async function loadBookingDetail(bookingId) {
+            const normalizedId = normalizeBookingId(bookingId);
+            const bookingElement = document.getElementById('booking-detail');
+            if (!bookingElement) return;
+
+            if (!normalizedId) {
+                bookingElement.innerHTML = '<div class="loading">No booking detail available.</div>';
+                return;
+            }
+
+            try {
+                const data = await fetchJson(`${API_BASE}/operator/bookings/${encodeURIComponent(normalizedId)}`);
+                const booking = data.booking || {};
+                bookingElement.innerHTML = `
+                    <div class="detail-item"><strong>Booking ID:</strong> ${escapeHtml(booking.booking_id || '—')}</div>
+                    <div class="detail-item"><strong>Session ID:</strong> ${escapeHtml(booking.session_id || '—')}</div>
+                    <div class="detail-item"><strong>Status:</strong> ${escapeHtml(booking.booking_state || '—')}</div>
+                    <div class="detail-item"><strong>Seats:</strong> ${escapeHtml(booking.seat_count ?? '—')}</div>
+                    <div class="detail-item"><strong>Customer Phone:</strong> ${escapeHtml(booking.customer_phone || '—')}</div>
+                    <div class="detail-item"><strong>Trip ID:</strong> ${escapeHtml(booking.trip_id || '—')}</div>
+                    <div class="detail-item"><strong>Route:</strong> ${escapeHtml(booking.route_label || '—')}</div>
+                    <div class="detail-item"><strong>Date:</strong> ${escapeHtml(booking.journey_date || '—')}</div>
+                    <div class="detail-item"><strong>Time:</strong> ${escapeHtml(booking.departure_time || '—')}</div>
+                    <div class="detail-item"><strong>Price:</strong> ${formatCurrency(booking.price_amount, booking.price_currency)}</div>
+                    <div class="detail-item"><strong>Lock Key:</strong> ${escapeHtml(booking.lock_key || '—')}</div>
+                    <div class="detail-item"><strong>Lock Expires:</strong> ${formatDateTime(booking.lock_expires_at)}</div>
+                    <div class="detail-item"><strong>Ticket Media ID:</strong> ${escapeHtml(booking.ticket_media_id || '—')}</div>
+                    <div class="detail-item"><strong>Created:</strong> ${formatDateTime(booking.created_at)}</div>
+                    <div class="detail-item"><strong>Updated:</strong> ${formatDateTime(booking.updated_at)}</div>
+                `;
+            } catch (error) {
+                console.error('Error loading booking detail:', error);
+                renderError(bookingElement, 'Error loading booking detail.');
+            }
+        }
+
+        function startSessionPolling() {
+            if (!state.currentSessionId || state.activeTab !== 'sessions') return;
+            stopSessionPolling();
+            state.sessionDetailPoll = setInterval(loadSessionDetail, POLL_INTERVALS.sessionDetail);
+            state.messagesPoll = setInterval(loadSessionMessages, POLL_INTERVALS.messages);
+            state.bookingPoll = setInterval(() => {
+                if (state.currentBookingId) {
+                    loadBookingDetail(state.currentBookingId);
+                }
+            }, POLL_INTERVALS.booking);
+        }
+
+        function stopSessionPolling() {
+            if (state.sessionDetailPoll) clearInterval(state.sessionDetailPoll);
+            if (state.messagesPoll) clearInterval(state.messagesPoll);
+            if (state.bookingPoll) clearInterval(state.bookingPoll);
+            state.sessionDetailPoll = null;
+            state.messagesPoll = null;
+            state.bookingPoll = null;
+        }
+
+        function startSessionsListPolling() {
+            if (state.sessionsPoll) return;
+            state.sessionsPoll = setInterval(loadSessions, POLL_INTERVALS.sessions);
+        }
+
+        function stopSessionsListPolling() {
+            if (state.sessionsPoll) clearInterval(state.sessionsPoll);
+            state.sessionsPoll = null;
         }
 
         async function loadRoutes() {
@@ -492,8 +980,6 @@
                     loadTrips();
                     setTimeout(() => {
                         showTab('trips');
-                        document.querySelector('.tab.active').classList.remove('active');
-                        document.querySelectorAll('.tab')[0].classList.add('active');
                     }, 1000);
                 } else {
                     messageDiv.innerHTML = `<div class="error">Error: ${data.error || 'Unknown error'}</div>`;
@@ -504,7 +990,35 @@
             }
         });
 
+        document.getElementById('sessions-list').addEventListener('click', (event) => {
+            const sessionItem = event.target.closest('.session-item');
+            if (!sessionItem) return;
+            selectSession(sessionItem.dataset.sessionId, sessionItem.dataset.bookingId || null);
+        });
+
+        document.getElementById('session-search').addEventListener('input', () => {
+            loadSessions();
+        });
+
+        document.getElementById('session-status').addEventListener('change', () => {
+            loadSessions();
+        });
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                stopSessionsListPolling();
+                stopSessionPolling();
+            } else if (state.activeTab === 'sessions') {
+                startSessionsListPolling();
+                if (state.currentSessionId) {
+                    startSessionPolling();
+                }
+            }
+        });
+
         // Load data on page load
+        loadSessions();
+        startSessionsListPolling();
         loadRoutes();
         loadTrips();
         

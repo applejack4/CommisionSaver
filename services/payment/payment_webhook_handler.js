@@ -1,67 +1,46 @@
-/*
-PSEUDOCODE: Payment webhook handling (on-time vs late payment)
+const paymentWebhookHandler = async (req, res) => {
+  try {
+    console.log(
+      'Webhook body type:',
+      Buffer.isBuffer(req.body) ? 'raw-buffer' : typeof req.body
+    );
 
-function handlePaymentWebhook(webhook):
+    const rawBody = req.body;
+    let payload = null;
 
-  # ---------- 0. Verify webhook authenticity ----------
-  if not PaymentGateway.verifySignature(webhook):
-      return HTTP 401
+    if (Buffer.isBuffer(rawBody)) {
+      const text = rawBody.toString('utf8').trim();
+      if (text.length > 0) {
+        payload = JSON.parse(text);
+      }
+    } else if (rawBody && typeof rawBody === 'object') {
+      const hasKeys =
+        Array.isArray(rawBody) ? rawBody.length > 0 : Object.keys(rawBody).length > 0;
+      if (hasKeys) {
+        payload = rawBody;
+      }
+    }
 
-  # ---------- 1. Idempotency ----------
-  idempotencyKey = "payment_webhook:" + webhook.gateway_event_id
-  if Idempotency.exists(idempotencyKey):
-      return HTTP 200  # already processed
+    if (!payload) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid or empty webhook payload',
+      });
+    }
 
-  # ---------- 2. Extract core identifiers ----------
-  bookingId = webhook.metadata.booking_id
-  paymentStatus = webhook.status  # SUCCESS | FAILED | PENDING
+    // IMPORTANT: Webhooks must respond quickly.
+    // Heavy processing must move to async jobs later.
+    console.log('Payment webhook received', {
+      gateway_event_id: payload.gateway_event_id,
+      status: payload.status,
+      booking_id: payload?.metadata?.booking_id,
+    });
 
-  booking = BookingService.getById(bookingId)
-  if booking is null:
-      emit EVENT_PAYMENT_ORPHANED { gateway_event_id }
-      Idempotency.store(idempotencyKey, "ORPHAN", TTL=7d)
-      return HTTP 200
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('Payment webhook error:', error.message);
+    return res.status(500).json({ success: false });
+  }
+};
 
-  session = SessionManager.get(booking.session_id)
-  if session is null:
-      emit EVENT_SESSION_INVALID
-      Idempotency.store(idempotencyKey, "SESSION_MISSING", TTL=7d)
-      return HTTP 200
-
-  # ---------- 3. Conversation state alignment ----------
-  if session.conversation_state != PAY_LINK_SENT:
-      emit EVENT_CONVERSATION_STATE_MISMATCH { booking_id = booking.id }
-
-  # ---------- 4. On-time payment path ----------
-  if booking.state == PAYMENT_PENDING:
-      if paymentStatus == SUCCESS:
-          BookingService.updateState(booking.id, PAYMENT_PROCESSING)
-          emit EVENT_PAYMENT_PROCESSING { booking_id = booking.id }
-
-          BookingService.updateState(booking.id, CONFIRMED)
-          emit EVENT_BOOKING_CONFIRMED { booking_id = booking.id }
-
-          Idempotency.store(idempotencyKey, "SUCCESS", TTL=7d)
-          return HTTP 200
-
-      if paymentStatus == FAILED:
-          BookingService.updateState(booking.id, EXPIRED)
-          InventoryLockService.releaseLock(booking.lock_key, booking.session_id)
-          emit EVENT_PAYMENT_FAILED { booking_id = booking.id }
-
-          Idempotency.store(idempotencyKey, "FAILED", TTL=7d)
-          return HTTP 200
-
-  # ---------- 5. Late payment path ----------
-  if booking.state == EXPIRED and paymentStatus == SUCCESS:
-      emit EVENT_LATE_PAYMENT_RECEIVED { booking_id = booking.id }
-
-      # Inventory may already be released; do not create new states
-      Idempotency.store(idempotencyKey, "LATE_SUCCESS", TTL=7d)
-      return HTTP 200
-
-  # ---------- 6. Unhandled / pending ----------
-  emit EVENT_PAYMENT_UNHANDLED { booking_id = booking.id, state = booking.state }
-  Idempotency.store(idempotencyKey, "UNHANDLED", TTL=7d)
-  return HTTP 200
-*/
+module.exports = paymentWebhookHandler;

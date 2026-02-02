@@ -5,6 +5,7 @@ const bookingModel = require('../models/booking');
 const routeModel = require('../models/route');
 const tripModel = require('../models/trip');
 const messageLogModel = require('../models/messageLog');
+const operatorTakeoverModel = require('../models/operatorTakeover');
 const whatsappService = require('../services/whatsapp');
 const { parseBookingRequest, getHelpMessage } = require('../services/messageParser');
 const { getDatabase } = require('../database');
@@ -19,6 +20,17 @@ const HOLD_DURATION_MINUTES = parseInt(process.env.HOLD_DURATION_MINUTES || '10'
  */
 function normalizePhoneNumber(phoneNumber) {
   return phoneNumber.replace(/[\s+\-()]/g, '');
+}
+
+async function isTakeoverActiveForCustomer(phoneNumber) {
+  const bookings = await bookingModel.findByPhone(phoneNumber);
+  if (!bookings || bookings.length === 0) {
+    return false;
+  }
+  const latestBooking = bookings[0];
+  const sessionId = `sess_${latestBooking.id}`;
+  const activeTakeover = await operatorTakeoverModel.findActiveBySession(sessionId);
+  return !!activeTakeover;
 }
 
 /**
@@ -158,6 +170,11 @@ router.post('/whatsapp/webhook', async (req, res) => {
 async function handleCustomerMessage(phoneNumber, messageText) {
   console.log(`[handleCustomerMessage] Processing message from ${phoneNumber}: "${messageText}"`);
   const upperText = messageText.toUpperCase().trim();
+
+  if (await isTakeoverActiveForCustomer(phoneNumber)) {
+    console.log(`[handleCustomerMessage] Takeover active for ${phoneNumber}; skipping auto-reply.`);
+    return;
+  }
   
   // Check for help request
   if (upperText === 'HELP' || upperText === '?' || upperText.startsWith('HOW')) {
