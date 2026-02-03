@@ -96,6 +96,7 @@ function initializeDatabase() {
                 seat_count INTEGER NOT NULL DEFAULT 1,
                 status TEXT NOT NULL DEFAULT 'hold',
                 hold_expires_at DATETIME,
+                lock_key TEXT,
                 ticket_attachment_id TEXT,
                 ticket_received_at DATETIME,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -239,6 +240,7 @@ function runMigrations(db) {
       const hasHoldExpiresAt = columnNames.includes('hold_expires_at');
       const hasTicketAttachmentId = columnNames.includes('ticket_attachment_id');
       const hasTicketReceivedAt = columnNames.includes('ticket_received_at');
+      const hasLockKey = columnNames.includes('lock_key');
 
       db.serialize(() => {
         // Migration: Add trip_id column if it doesn't exist
@@ -298,6 +300,19 @@ function runMigrations(db) {
           });
         } else {
           resolve(); // All columns already exist
+        }
+
+        if (!hasLockKey) {
+          db.run(`
+            ALTER TABLE bookings 
+            ADD COLUMN lock_key TEXT
+          `, (err) => {
+            if (err) {
+              console.error('Error adding lock_key column:', err.message);
+            } else {
+              console.log('Added lock_key column to bookings table');
+            }
+          });
         }
       });
     });

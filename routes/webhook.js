@@ -287,11 +287,13 @@ async function handleCustomerMessage(phoneNumber, messageText) {
 
   // Create HOLD booking
   try {
+    const lockKey = `lock:seat:${trip.id}:${trip.journey_date}:${trip.departure_time}`;
     const booking = await bookingModel.create({
       customer_phone: phoneNumber,
       trip_id: trip.id,
       seat_count: bookingRequest.seats,
-      hold_duration_minutes: HOLD_DURATION_MINUTES
+      hold_duration_minutes: HOLD_DURATION_MINUTES,
+      lock_key: lockKey
     });
 
     console.log(`Hold created: Booking ID ${booking.id} for ${bookingRequest.seats} seats`);

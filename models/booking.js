@@ -8,6 +8,7 @@ const { getDatabase } = require('../database');
  * @param {number} bookingData.trip_id - Trip ID
  * @param {number} bookingData.seat_count - Number of seats (default: 1)
  * @param {number} bookingData.hold_duration_minutes - Hold duration in minutes (default: 10)
+ * @param {string} bookingData.lock_key - Redis lock key for this booking (optional)
  * @returns {Promise<Object>} Created booking object with id
  */
 async function create(bookingData) {
@@ -18,7 +19,8 @@ async function create(bookingData) {
     customer_phone,
     trip_id,
     seat_count = 1,
-    hold_duration_minutes = 10
+    hold_duration_minutes = 10,
+    lock_key = null
   } = bookingData;
 
   // Calculate hold expiration time
@@ -27,9 +29,9 @@ async function create(bookingData) {
 
   return new Promise((resolve, reject) => {
     db.run(
-      `INSERT INTO bookings (customer_name, customer_phone, trip_id, seat_count, status, hold_expires_at)
-       VALUES (?, ?, ?, ?, 'hold', ?)`,
-      [customer_name, customer_phone, trip_id, seat_count, holdExpiresAt.toISOString()],
+      `INSERT INTO bookings (customer_name, customer_phone, trip_id, seat_count, status, hold_expires_at, lock_key)
+       VALUES (?, ?, ?, ?, 'hold', ?, ?)`,
+      [customer_name, customer_phone, trip_id, seat_count, holdExpiresAt.toISOString(), lock_key],
       function (err) {
         if (err) {
           reject(err);
@@ -142,6 +144,32 @@ async function findExpiredHolds() {
        JOIN routes r ON t.route_id = r.id
        WHERE b.status = 'hold' AND b.hold_expires_at <= datetime('now')`,
       [],
+      (err, rows) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(rows || []);
+      }
+    );
+  });
+}
+
+/**
+ * Find active holds (status = 'hold')
+ * @returns {Promise<Array>} Array of active hold bookings
+ */
+async function findActiveHolds() {
+  const db = await getDatabase();
+
+  return new Promise((resolve, reject) => {
+    db.all(
+      `SELECT b.*, t.journey_date, t.departure_time, r.source, r.destination
+       FROM bookings b
+       JOIN trips t ON b.trip_id = t.id
+       JOIN routes r ON t.route_id = r.id
+       WHERE b.status = 'hold'
+       ORDER BY b.created_at DESC`,
       (err, rows) => {
         if (err) {
           reject(err);
@@ -351,6 +379,7 @@ module.exports = {
   findById,
   findByPhone,
   findActiveHoldsByTrip,
+  findActiveHolds,
   findExpiredHolds,
   updateStatus,
   confirmWithTicket,

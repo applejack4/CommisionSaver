@@ -489,9 +489,10 @@ router.get('/bookings/:booking_id', async (req, res) => {
         departure_time: booking.departure_time || null,
         price_amount: booking.price ?? null,
         price_currency: booking.price != null ? 'INR' : null,
-        lock_key: booking.trip_id
-          ? `lock:seat:${booking.trip_id}:${booking.journey_date}:${booking.departure_time}`
-          : 'lock:seat:unknown',
+        lock_key: booking.lock_key
+          || (booking.trip_id
+            ? `lock:seat:${booking.trip_id}:${booking.journey_date}:${booking.departure_time}`
+            : 'lock:seat:unknown'),
         lock_expires_at: booking.hold_expires_at
           ? toIsoTimestamp(booking.hold_expires_at)
           : null,

@@ -54,15 +54,49 @@ function normalizeArgs(lockKeyOrOptions, sessionId, ttlSeconds) {
   };
 }
 
-async function evalScript(redisClient, script, keys, args) {
-  if (!redisClient || typeof redisClient.eval !== 'function') {
-    throw new Error('Redis client does not support eval');
+const scriptCache = new Map();
+const scriptLoadPromises = new Map();
+
+function isNoScriptError(error) {
+  return Boolean(error && typeof error.message === 'string' && error.message.includes('NOSCRIPT'));
+}
+
+async function loadScript(redisClient, script) {
+  if (scriptCache.has(script)) {
+    return scriptCache.get(script);
   }
 
+  if (scriptLoadPromises.has(script)) {
+    return scriptLoadPromises.get(script);
+  }
+
+  const loadPromise = redisClient
+    .sendCommand(['SCRIPT', 'LOAD', script])
+    .then((sha) => {
+      scriptCache.set(script, sha);
+      return sha;
+    })
+    .finally(() => {
+      scriptLoadPromises.delete(script);
+    });
+
+  scriptLoadPromises.set(script, loadPromise);
+  return loadPromise;
+}
+
+async function evalScript(redisClient, script, keys, args) {
+  if (!redisClient || typeof redisClient.sendCommand !== 'function') {
+    throw new Error('Redis client does not support sendCommand');
+  }
+
+  const sha = await loadScript(redisClient, script);
   try {
-    return await redisClient.eval(script, { keys, arguments: args });
+    return await redisClient.sendCommand(['EVALSHA', sha, keys.length, ...keys, ...args]);
   } catch (error) {
-    return await redisClient.eval(script, keys.length, ...keys, ...args);
+    if (isNoScriptError(error)) {
+      return await redisClient.sendCommand(['EVAL', script, keys.length, ...keys, ...args]);
+    }
+    throw error;
   }
 }
 
@@ -70,6 +104,9 @@ class InventoryLockService {
   constructor(redisClient, eventBus = null) {
     this.redisClient = redisClient;
     this.eventBus = eventBus;
+    this.scriptLoad = Promise.all(
+      Object.values(LUA_SCRIPTS).map((script) => loadScript(this.redisClient, script))
+    );
   }
 
   emitEvent(eventName, payload) {
@@ -79,6 +116,7 @@ class InventoryLockService {
   }
 
   async acquireLock(lockKeyOrOptions, sessionId, ttlSeconds) {
+    await this.scriptLoad;
     const { lockKey, sessionId: ownerId, ttlSeconds: ttl, metadata } = normalizeArgs(
       lockKeyOrOptions,
       sessionId,
@@ -129,6 +167,7 @@ class InventoryLockService {
   }
 
   async releaseLock(lockKeyOrOptions, sessionId) {
+    await this.scriptLoad;
     const { lockKey, sessionId: ownerId, metadata } = normalizeArgs(
       lockKeyOrOptions,
       sessionId
@@ -178,6 +217,7 @@ class InventoryLockService {
   }
 
   async extendLock(lockKeyOrOptions, sessionId, ttlSeconds) {
+    await this.scriptLoad;
     const { lockKey, sessionId: ownerId, ttlSeconds: ttl } = normalizeArgs(
       lockKeyOrOptions,
       sessionId,
