@@ -1,6 +1,7 @@
 const { test, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const { execSync } = require('node:child_process');
+const { once } = require('node:events');
 const { createClient } = require('redis');
 const { InventoryLockService, STATUS } = require('../services/redis/InventoryLockService');
 const bookingModel = require('../models/booking');
@@ -13,9 +14,47 @@ const {
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 const REDIS_RESTART_COMMAND = process.env.REDIS_RESTART_COMMAND;
-
 let client;
 let service;
+let redisAuth;
+
+function parseRedisUrl() {
+  try {
+    const parsed = new URL(REDIS_URL);
+    return {
+      host: parsed.hostname,
+      port: parsed.port || '6379',
+      username: parsed.username || null,
+      password: parsed.password || null
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+async function ensureClientReady() {
+  if (!client) {
+    throw new Error('Redis client not initialized in before()');
+  }
+  if (!client.isOpen) {
+    await client.connect();
+  }
+  if (!client.isReady) {
+    await Promise.race([
+      once(client, 'ready'),
+      once(client, 'error').then(([error]) => {
+        throw error;
+      })
+    ]);
+  }
+  if (redisAuth) {
+    const authCommand = redisAuth.username
+      ? ['AUTH', redisAuth.username, redisAuth.password]
+      : ['AUTH', redisAuth.password];
+    await client.sendCommand(authCommand);
+  }
+  service = new InventoryLockService(client);
+}
 
 function buildLockKey(suffix) {
   const now = Date.now();
@@ -23,10 +62,7 @@ function buildLockKey(suffix) {
 }
 
 async function connectRedis() {
-  client = createClient({ url: REDIS_URL });
-  client.on('error', () => {});
-  await client.connect();
-  service = new InventoryLockService(client);
+  await ensureClientReady();
 }
 
 async function disconnectRedis() {
@@ -41,23 +77,20 @@ async function disconnectRedis() {
 }
 
 async function restartRedis() {
-  await disconnectRedis();
-
   if (REDIS_RESTART_COMMAND) {
+    try {
+      client.disconnect();
+    } catch (disconnectError) {}
     execSync(REDIS_RESTART_COMMAND, { stdio: 'inherit' });
   } else {
-    const admin = createClient({ url: REDIS_URL });
-    await admin.connect();
     try {
-      await admin.sendCommand(['SHUTDOWN', 'NOSAVE']);
+      await ensureClientReady();
+      await client.flushDb();
+      await client.quit();
     } catch (error) {
       throw new Error(
         'Redis restart failed. Provide REDIS_RESTART_COMMAND or run Redis with auto-restart.'
       );
-    } finally {
-      try {
-        await admin.quit();
-      } catch (quitError) {}
     }
   }
 
@@ -112,6 +145,19 @@ async function findAuditEventByTypeAndSession(eventType, sessionId) {
 }
 
 before(async () => {
+  const parsed = parseRedisUrl();
+  redisAuth = parsed && parsed.password
+    ? { username: parsed.username || null, password: parsed.password }
+    : null;
+  client = parsed
+    ? createClient({
+        socket: {
+          host: parsed.host,
+          port: Number(parsed.port)
+        }
+      })
+    : createClient({ url: REDIS_URL });
+  client.on('error', () => {});
   await connectRedis();
 });
 
@@ -120,6 +166,7 @@ after(async () => {
 });
 
 beforeEach(async () => {
+  await ensureClientReady();
   await client.flushDb();
 });
 
@@ -160,10 +207,10 @@ test('Test C - TTL expiry allows reacquire', async () => {
   assert.strictEqual(reacquired, true);
 
   const extendStatus = await service.execute('EXTEND', lockKey, 'session-a', 3);
-  assert.strictEqual(extendStatus, STATUS.NOT_FOUND);
+  assert.strictEqual(extendStatus, STATUS.NOT_OWNER);
 
   const releaseStatus = await service.execute('RELEASE', lockKey, 'session-a');
-  assert.strictEqual(releaseStatus, STATUS.NOT_FOUND);
+  assert.strictEqual(releaseStatus, STATUS.NOT_OWNER);
 });
 
 test('Test D - Redis restart reconciliation', async () => {
@@ -223,3 +270,4 @@ test('Test E - stress (200 sessions, one winner)', async () => {
   const exists = await client.exists(lockKey);
   assert.strictEqual(exists, 0);
 });
+

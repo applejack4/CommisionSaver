@@ -37,6 +37,9 @@ async function processPaymentEvent(payload, { redisClient }) {
   }
 
   const sessionId = `sess_${bookingId}`;
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'P',location:'payment_processor.js:39',message:'processPaymentEvent entry',data:{bookingId,gatewayEventId,status:payload?.status,redisIsOpen:redisClient?.isOpen,redisIsReady:redisClient?.isReady},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
   const existing = await auditEventModel.findByIdempotencyKey(
     sessionId,
     gatewayEventId,
@@ -64,7 +67,20 @@ async function processPaymentEvent(payload, { redisClient }) {
 
   const lockKey = defaultLockKeyForBooking(booking);
   const lockService = new InventoryLockService(redisClient);
-  await lockService.expire(lockKey);
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'P',location:'payment_processor.js:66',message:'processPaymentEvent expire start',data:{lockKey,redisIsOpen:redisClient?.isOpen,redisIsReady:redisClient?.isReady},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
+  try {
+    await lockService.expire(lockKey);
+  } catch (error) {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'P',location:'payment_processor.js:69',message:'processPaymentEvent expire error',data:{name:error?.name,message:error?.message},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    throw error;
+  }
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'P',location:'payment_processor.js:73',message:'processPaymentEvent expire done',data:{lockKey},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
 
   await auditEventModel.create({
     event_type: 'PAYMENT_WEBHOOK',

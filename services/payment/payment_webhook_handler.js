@@ -1,3 +1,8 @@
+const { createClient } = require('redis');
+const { processPaymentEvent } = require('./payment_processor');
+
+const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+
 const paymentWebhookHandler = async (req, res) => {
   try {
     console.log(
@@ -35,6 +40,18 @@ const paymentWebhookHandler = async (req, res) => {
       status: payload.status,
       booking_id: payload?.metadata?.booking_id,
     });
+
+    const redisClient = createClient({ url: REDIS_URL });
+    await redisClient.connect();
+    try {
+      await processPaymentEvent(payload, { redisClient });
+    } finally {
+      try {
+        await redisClient.quit();
+      } catch (error) {
+        redisClient.disconnect();
+      }
+    }
 
     return res.status(200).json({ success: true });
   } catch (error) {

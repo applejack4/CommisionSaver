@@ -85,15 +85,24 @@ async function loadScript(redisClient, script) {
 }
 
 async function evalScript(redisClient, script, keys, args) {
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'K',location:'inventory_lock_service.js:87',message:'evalScript entry',data:{keysType:Array.isArray(keys)?'array':typeof keys,keysLen:Array.isArray(keys)?keys.length:null,keysLenType:Array.isArray(keys)?typeof keys.length:null,argsType:Array.isArray(args)?'array':typeof args,argsLen:Array.isArray(args)?args.length:null,argsTypes:Array.isArray(args)?args.map((arg)=>typeof arg):null},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
   if (!redisClient || typeof redisClient.sendCommand !== 'function') {
     throw new Error('Redis client does not support sendCommand');
   }
 
   const sha = await loadScript(redisClient, script);
   try {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'K',location:'inventory_lock_service.js:94',message:'evalScript EVALSHA args',data:{shaType:typeof sha,keysLenType:typeof keys.length,keysSample:Array.isArray(keys)?keys.slice(0,1):null,argsTypes:Array.isArray(args)?args.map((arg)=>typeof arg):null},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     return await redisClient.sendCommand(['EVALSHA', sha, keys.length, ...keys, ...args]);
   } catch (error) {
     if (isNoScriptError(error)) {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'K',location:'inventory_lock_service.js:98',message:'evalScript NOSCRIPT fallback',data:{keysLenType:typeof keys.length,argsTypes:Array.isArray(args)?args.map((arg)=>typeof arg):null},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       return await redisClient.sendCommand(['EVAL', script, keys.length, ...keys, ...args]);
     }
     throw error;

@@ -31,3 +31,6 @@ Thumbs.db
 # Build outputs
 dist/
 build/
+
+#cursor
+.cursor/

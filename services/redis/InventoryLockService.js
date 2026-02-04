@@ -54,16 +54,34 @@ async function loadScript(redisClient, script) {
 }
 
 async function evalScript(redisClient, script, keys, args) {
+  // #region agent log
+  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'M',location:'InventoryLockService.js:56',message:'evalScript entry',data:{keysType:Array.isArray(keys)?'array':typeof keys,keysLen:Array.isArray(keys)?keys.length:null,keysLenType:Array.isArray(keys)?typeof keys.length:null,argsType:Array.isArray(args)?'array':typeof args,argsLen:Array.isArray(args)?args.length:null,argsTypes:Array.isArray(args)?args.map((arg)=>typeof arg):null},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
   if (!redisClient || typeof redisClient.sendCommand !== 'function') {
     throw new Error('Redis client does not support sendCommand');
   }
 
+  const serializedKeys = Array.isArray(keys) ? keys.map((key) => String(key)) : [];
+  const serializedArgs = Array.isArray(args)
+    ? args.map((arg) => (typeof arg === 'number' ? String(arg) : arg))
+    : [];
+  const keyCount = String(serializedKeys.length);
+
   const sha = await loadScript(redisClient, script);
   try {
-    return await redisClient.sendCommand(['EVALSHA', sha, keys.length, ...keys, ...args]);
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'M',location:'InventoryLockService.js:63',message:'evalScript EVALSHA args',data:{shaType:typeof sha,keysLenType:typeof keys.length,keysSample:Array.isArray(keys)?keys.slice(0,1):null,argsTypes:Array.isArray(args)?args.map((arg)=>typeof arg):null},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    return await redisClient.sendCommand(['EVALSHA', sha, keyCount, ...serializedKeys, ...serializedArgs]);
   } catch (error) {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'E',location:'InventoryLockService.js:69',message:'evalScript error',data:{name:error?.name,message:error?.message,isNoScript:isNoScriptError(error)},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     if (isNoScriptError(error)) {
-      return await redisClient.sendCommand(['EVAL', script, keys.length, ...keys, ...args]);
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'M',location:'InventoryLockService.js:66',message:'evalScript NOSCRIPT fallback',data:{keysLenType:typeof keys.length,argsTypes:Array.isArray(args)?args.map((arg)=>typeof arg):null},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+      return await redisClient.sendCommand(['EVAL', script, keyCount, ...serializedKeys, ...serializedArgs]);
     }
     throw error;
   }
