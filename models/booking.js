@@ -13,6 +13,37 @@ const LEGACY_STATUS_MAP = Object.freeze({
   rejected: BOOKING_STATUSES.CANCELLED
 });
 
+function parseJsonArray(rawValue) {
+  if (!rawValue || typeof rawValue !== 'string') return null;
+  try {
+    const parsed = JSON.parse(rawValue);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function getLockKeys(booking) {
+  if (!booking) return [];
+  const stored = parseJsonArray(booking.lock_keys);
+  if (stored && stored.length > 0) {
+    return stored.map((value) => String(value));
+  }
+  if (booking.lock_key) {
+    return [String(booking.lock_key)];
+  }
+  return [];
+}
+
+function getSeatNumbers(booking) {
+  if (!booking) return [];
+  const stored = parseJsonArray(booking.seat_numbers);
+  if (stored && stored.length > 0) {
+    return stored;
+  }
+  return [];
+}
+
 function normalizeStatus(status) {
   if (!status) return null;
   const normalized = String(status).trim().toLowerCase();
@@ -50,6 +81,9 @@ function isAllowedTransition(fromStatus, toStatus) {
  * @param {number} bookingData.seat_count - Number of seats (default: 1)
  * @param {number} bookingData.hold_duration_minutes - Hold duration in minutes (default: 10)
  * @param {string} bookingData.lock_key - Redis lock key for this booking (optional)
+ * @param {string[]} bookingData.lock_keys - Redis lock keys for this booking (optional)
+ * @param {number[]} bookingData.seat_numbers - Seat numbers held by this booking (optional)
+ * @param {string|Date} bookingData.hold_expires_at - Hold expiry override (optional)
  * @returns {Promise<Object>} Created booking object with id
  */
 async function create(bookingData) {
@@ -61,29 +95,72 @@ async function create(bookingData) {
     trip_id,
     seat_count = 1,
     hold_duration_minutes = 10,
-    lock_key = null
+    lock_key = null,
+    lock_keys = null,
+    seat_numbers = null,
+    hold_expires_at = null
   } = bookingData;
 
-  // Calculate hold expiration time
-  const holdExpiresAt = new Date();
-  holdExpiresAt.setMinutes(holdExpiresAt.getMinutes() + hold_duration_minutes);
+  const holdExpiresAt = hold_expires_at
+    ? new Date(hold_expires_at)
+    : (() => {
+        const expiresAt = new Date();
+        expiresAt.setMinutes(expiresAt.getMinutes() + hold_duration_minutes);
+        return expiresAt;
+      })();
+
+  const normalizedLockKeys = Array.isArray(lock_keys) ? lock_keys : null;
+  const normalizedSeatNumbers = Array.isArray(seat_numbers) ? seat_numbers : null;
+  const primaryLockKey =
+    lock_key || (normalizedLockKeys && normalizedLockKeys.length > 0 ? normalizedLockKeys[0] : null);
 
   return new Promise((resolve, reject) => {
-    db.run(
-      `INSERT INTO bookings (customer_name, customer_phone, trip_id, seat_count, status, hold_expires_at, lock_key)
-       VALUES (?, ?, ?, ?, 'hold', ?, ?)`,
-      [customer_name, customer_phone, trip_id, seat_count, holdExpiresAt.toISOString(), lock_key],
-      function (err) {
-        if (err) {
-          reject(err);
-          return;
+    db.serialize(() => {
+      db.run('BEGIN TRANSACTION');
+      db.run(
+        `INSERT INTO bookings (
+           customer_name,
+           customer_phone,
+           trip_id,
+           seat_count,
+           seat_numbers,
+           status,
+           hold_expires_at,
+           lock_key,
+           lock_keys
+         )
+         VALUES (?, ?, ?, ?, ?, 'hold', ?, ?, ?)`,
+        [
+          customer_name,
+          customer_phone,
+          trip_id,
+          seat_count,
+          normalizedSeatNumbers ? JSON.stringify(normalizedSeatNumbers) : null,
+          holdExpiresAt.toISOString(),
+          primaryLockKey,
+          normalizedLockKeys ? JSON.stringify(normalizedLockKeys) : null
+        ],
+        function (err) {
+          if (err) {
+            db.run('ROLLBACK');
+            reject(err);
+            return;
+          }
+
+          const bookingId = this.lastID;
+          db.run('COMMIT', (commitErr) => {
+            if (commitErr) {
+              db.run('ROLLBACK');
+              reject(commitErr);
+              return;
+            }
+            findById(bookingId)
+              .then((booking) => resolve(booking))
+              .catch(reject);
+          });
         }
-        
-        findById(this.lastID)
-          .then(booking => resolve(booking))
-          .catch(reject);
-      }
-    );
+      );
+    });
   });
 }
 
@@ -275,6 +352,7 @@ async function transitionStatus(id, status, options = {}) {
         }
 
         try {
+          // Release Redis locks only after the DB status transition commits.
           if (shouldReleaseLock && typeof options.releaseInventoryLock === 'function') {
             await options.releaseInventoryLock();
           }
@@ -418,5 +496,7 @@ module.exports = {
   expireHold,
   findByTripId,
   findBookingsNeedingReminders,
-  hasReminder
+  hasReminder,
+  getLockKeys,
+  getSeatNumbers
 };

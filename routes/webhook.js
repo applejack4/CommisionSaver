@@ -9,9 +9,17 @@ const operatorTakeoverModel = require('../models/operatorTakeover');
 const whatsappService = require('../services/whatsapp');
 const { parseBookingRequest, getHelpMessage } = require('../services/messageParser');
 const { getDatabase } = require('../database');
+const { createClient } = require('redis');
+const { InventoryLockService } = require('../services/redis/InventoryLockService');
+const {
+  buildSeatLockKey,
+  getLockKeysForBooking,
+  releaseLockKeys
+} = require('../services/inventoryLocking');
 
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
 const HOLD_DURATION_MINUTES = parseInt(process.env.HOLD_DURATION_MINUTES || '10', 10);
+const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 
 /**
  * Normalize phone number for matching (remove +, spaces, etc.)
@@ -20,6 +28,50 @@ const HOLD_DURATION_MINUTES = parseInt(process.env.HOLD_DURATION_MINUTES || '10'
  */
 function normalizePhoneNumber(phoneNumber) {
   return phoneNumber.replace(/[\s+\-()]/g, '');
+}
+
+async function acquireSeatLocks({
+  lockService,
+  tripId,
+  seatCount,
+  seatQuota,
+  sessionId,
+  ttlSeconds
+}) {
+  const seatNumbers = [];
+  const lockKeys = [];
+
+  for (let seatNumber = 1; seatNumber <= seatQuota && seatNumbers.length < seatCount; seatNumber += 1) {
+    const lockKey = buildSeatLockKey(tripId, seatNumber);
+    try {
+      const acquired = await lockService.acquire(lockKey, sessionId, ttlSeconds);
+      if (acquired) {
+        seatNumbers.push(seatNumber);
+        lockKeys.push(lockKey);
+      }
+    } catch (error) {
+      await releaseLockKeys(lockService, lockKeys, {
+        bookingId: null,
+        reason: 'acquire-failed'
+      });
+      throw error;
+    }
+  }
+
+  if (seatNumbers.length < seatCount) {
+    await releaseLockKeys(lockService, lockKeys, {
+      bookingId: null,
+      reason: 'acquire-insufficient'
+    });
+    return { acquired: false, seatNumbers: [], lockKeys: [] };
+  }
+
+  console.log('[inventory-locks] Acquired locks', {
+    tripId,
+    seatCount,
+    lockKeys
+  });
+  return { acquired: true, seatNumbers, lockKeys };
 }
 
 async function isTakeoverActiveForCustomer(phoneNumber) {
@@ -287,14 +339,64 @@ async function handleCustomerMessage(phoneNumber, messageText) {
 
   // Create HOLD booking
   try {
-    const lockKey = `lock:seat:${trip.id}:${trip.journey_date}:${trip.departure_time}`;
-    const booking = await bookingModel.create({
-      customer_phone: phoneNumber,
-      trip_id: trip.id,
-      seat_count: bookingRequest.seats,
-      hold_duration_minutes: HOLD_DURATION_MINUTES,
-      lock_key: lockKey
-    });
+    const holdExpiresAt = new Date(Date.now() + HOLD_DURATION_MINUTES * 60 * 1000);
+    const ttlSeconds = Math.max(
+      1,
+      Math.ceil((holdExpiresAt.getTime() - Date.now()) / 1000)
+    );
+    const sessionId = `sess_${phoneNumber}_${Date.now()}`;
+
+    // Acquire Redis locks before DB hold to enforce "no lock -> no hold".
+    const redisClient = createClient({ url: REDIS_URL });
+    await redisClient.connect();
+    const lockService = new InventoryLockService(redisClient);
+
+    let lockPayload = null;
+    let booking = null;
+    try {
+      lockPayload = await acquireSeatLocks({
+        lockService,
+        tripId: trip.id,
+        seatCount: bookingRequest.seats,
+        seatQuota: trip.whatsapp_seat_quota,
+        sessionId,
+        ttlSeconds
+      });
+
+      if (!lockPayload.acquired) {
+        try {
+          await whatsappService.sendMessage(phoneNumber, 'Seats unavailable');
+        } catch (error) {
+          console.error('Failed to send lock failure message:', error.message);
+        }
+        return;
+      }
+
+      try {
+        booking = await bookingModel.create({
+          customer_phone: phoneNumber,
+          trip_id: trip.id,
+          seat_count: bookingRequest.seats,
+          hold_duration_minutes: HOLD_DURATION_MINUTES,
+          hold_expires_at: holdExpiresAt.toISOString(),
+          seat_numbers: lockPayload.seatNumbers,
+          lock_keys: lockPayload.lockKeys,
+          lock_key: lockPayload.lockKeys[0]
+        });
+      } catch (error) {
+        await releaseLockKeys(lockService, lockPayload.lockKeys, {
+          bookingId: null,
+          reason: 'hold-insert-failed'
+        });
+        throw error;
+      }
+    } finally {
+      try {
+        await redisClient.quit();
+      } catch (error) {
+        redisClient.disconnect();
+      }
+    }
 
     console.log(`Hold created: Booking ID ${booking.id} for ${bookingRequest.seats} seats`);
 
@@ -425,7 +527,27 @@ async function handleOperatorMessage(phoneNumber, message, messageType) {
 
     // Confirm booking with ticket
     try {
-      const confirmedBooking = await bookingModel.confirmWithTicket(activeHold.id, mediaId);
+      const lockKeys = getLockKeysForBooking(activeHold);
+      const redisClient = createClient({ url: REDIS_URL });
+      await redisClient.connect();
+      const lockService = new InventoryLockService(redisClient);
+
+      let confirmedBooking = null;
+      try {
+        confirmedBooking = await bookingModel.confirmWithTicket(activeHold.id, mediaId, {
+          releaseInventoryLock: async () =>
+            releaseLockKeys(lockService, lockKeys, {
+              bookingId: activeHold.id,
+              reason: 'confirm'
+            })
+        });
+      } finally {
+        try {
+          await redisClient.quit();
+        } catch (error) {
+          redisClient.disconnect();
+        }
+      }
       
       if (!confirmedBooking) {
         throw new Error('Failed to confirm booking');

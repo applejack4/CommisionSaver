@@ -1,9 +1,11 @@
 const bookingModel = require('../models/booking');
 const auditEventModel = require('../models/auditEvent');
+const { buildSeatLockKey, getLockKeysForBooking } = require('./inventoryLocking');
 
 function defaultLockKeyForBooking(booking) {
-  if (booking.lock_key) {
-    return booking.lock_key;
+  const keys = getLockKeysForBooking(booking);
+  if (keys.length > 0) {
+    return keys[0];
   }
 
   const { trip_id: tripId, journey_date: journeyDate, departure_time: departureTime } = booking || {};
@@ -11,7 +13,7 @@ function defaultLockKeyForBooking(booking) {
     throw new Error('Missing booking fields required to derive lock key');
   }
 
-  return `lock:seat:${tripId}:${journeyDate}:${departureTime}`;
+  return buildSeatLockKey(tripId, 1);
 }
 
 /**
@@ -33,10 +35,24 @@ async function reconcileOrphanedInventoryLocks(redisClient, options = {}) {
   let released = 0;
 
   for (const hold of holds) {
-    const lockKey = lockKeyForBooking(hold);
-    const exists = await redisClient.exists(lockKey);
+    const lockKeys = getLockKeysForBooking(hold);
+    if (lockKeys.length === 0) {
+      console.warn('[inventory-locks] HELD booking missing lock keys', {
+        bookingId: hold.id,
+        tripId: hold.trip_id
+      });
+    }
 
-    if (exists) {
+    let hasAnyLock = false;
+    for (const lockKey of lockKeys) {
+      const exists = await redisClient.exists(lockKey);
+      if (exists) {
+        hasAnyLock = true;
+        break;
+      }
+    }
+
+    if (hasAnyLock) {
       continue;
     }
 
@@ -50,7 +66,7 @@ async function reconcileOrphanedInventoryLocks(redisClient, options = {}) {
       session_id: `sess_${hold.id}`,
       payload: {
         booking_id: hold.id,
-        lockKey
+        lockKeys
       }
     });
 

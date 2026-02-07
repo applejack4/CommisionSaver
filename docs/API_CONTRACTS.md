@@ -203,7 +203,7 @@ Operators may send outbound messages **only** when:
     "departure_time": "09:00",
     "price_amount": 1200,
     "price_currency": "INR",
-    "lock_key": "lock:seat:...",
+    "lock_key": "lock:trip:{tripId}:seat:{seatNumber}",
     "lock_expires_at": "2026-01-31T09:25:00Z",
     "ticket_media_id": null,
     "created_at": "2026-01-31T09:05:00Z",

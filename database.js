@@ -94,9 +94,11 @@ function initializeDatabase() {
                 customer_phone TEXT NOT NULL,
                 trip_id INTEGER NOT NULL,
                 seat_count INTEGER NOT NULL DEFAULT 1,
+                seat_numbers TEXT,
                 status TEXT NOT NULL DEFAULT 'hold',
                 hold_expires_at DATETIME,
                 lock_key TEXT,
+                lock_keys TEXT,
                 ticket_attachment_id TEXT,
                 ticket_received_at DATETIME,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -241,6 +243,8 @@ function runMigrations(db) {
       const hasTicketAttachmentId = columnNames.includes('ticket_attachment_id');
       const hasTicketReceivedAt = columnNames.includes('ticket_received_at');
       const hasLockKey = columnNames.includes('lock_key');
+      const hasLockKeys = columnNames.includes('lock_keys');
+      const hasSeatNumbers = columnNames.includes('seat_numbers');
 
       const finalize = () => {
         db.serialize(() => {
@@ -332,6 +336,32 @@ function runMigrations(db) {
               console.error('Error adding lock_key column:', err.message);
             } else {
               console.log('Added lock_key column to bookings table');
+            }
+          });
+        }
+
+        if (!hasLockKeys) {
+          db.run(`
+            ALTER TABLE bookings 
+            ADD COLUMN lock_keys TEXT
+          `, (err) => {
+            if (err) {
+              console.error('Error adding lock_keys column:', err.message);
+            } else {
+              console.log('Added lock_keys column to bookings table');
+            }
+          });
+        }
+
+        if (!hasSeatNumbers) {
+          db.run(`
+            ALTER TABLE bookings 
+            ADD COLUMN seat_numbers TEXT
+          `, (err) => {
+            if (err) {
+              console.error('Error adding seat_numbers column:', err.message);
+            } else {
+              console.log('Added seat_numbers column to bookings table');
             }
           });
         }

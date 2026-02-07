@@ -58,7 +58,7 @@ async function ensureClientReady() {
 
 function buildLockKey(suffix) {
   const now = Date.now();
-  return `lock:seat:test:${now}:${suffix}`;
+  return `lock:trip:${now}:seat:${suffix}`;
 }
 
 async function connectRedis() {
@@ -216,7 +216,7 @@ test('Test C - TTL expiry allows reacquire', async () => {
 test('Test D - Redis restart reconciliation', async () => {
   const tripId = await getAnyTripId();
   const trip = await tripModel.findById(tripId);
-  const lockKey = `lock:seat:${trip.id}:${trip.journey_date}:${trip.departure_time}`;
+  const lockKey = `lock:trip:${trip.id}:seat:1`;
   const booking = await bookingModel.create({
     customer_name: 'Reconcile Test',
     customer_phone: `999${Date.now()}`,

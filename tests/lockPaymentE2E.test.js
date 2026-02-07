@@ -192,7 +192,7 @@ beforeEach(async () => {
 test('E2E: lock -> payment fail -> release -> rebook succeeds', async () => {
   const tripId = await getAnyTripId();
   const trip = await tripModel.findById(tripId);
-  const lockKey = `lock:seat:${trip.id}:${trip.journey_date}:${trip.departure_time}`;
+  const lockKey = `lock:trip:${trip.id}:seat:1`;
   // #region agent log
   fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'F',location:'lockPaymentE2E.test.js:129',message:'pre-test bookings snapshot',data:{tripId,counts:(await bookingModel.findByTripId(tripId)).reduce((acc,booking)=>{acc.total+=1;acc[booking.status]=(acc[booking.status]||0)+1;return acc;},{total:0})},timestamp:Date.now()})}).catch(()=>{});
   // #endregion
@@ -309,3 +309,46 @@ test('E2E: lock -> payment fail -> release -> rebook succeeds', async () => {
   assert.strictEqual(idempotentRepeat.idempotent, true);
 });
 
+test('E2E: multi-seat locks release on payment failure', async () => {
+  const tripId = await getAnyTripId();
+  const trip = await tripModel.findById(tripId);
+
+  const seatNumbers = [1, 2];
+  const lockKeys = seatNumbers.map((seatNumber) => `lock:trip:${trip.id}:seat:${seatNumber}`);
+  const sessionId = `sess_multi_${Date.now()}`;
+
+  for (const lockKey of lockKeys) {
+    const acquired = await lockService.execute('ACQUIRE', lockKey, sessionId, 30);
+    assert.strictEqual(acquired, STATUS.ACQUIRED);
+    assert.strictEqual(await client.exists(lockKey), 1);
+  }
+
+  const booking = await bookingModel.create({
+    customer_name: 'E2E Multi',
+    customer_phone: `902${Date.now()}`,
+    trip_id: tripId,
+    seat_count: seatNumbers.length,
+    seat_numbers: seatNumbers,
+    hold_duration_minutes: 10,
+    lock_key: lockKeys[0],
+    lock_keys: lockKeys
+  });
+  await bookingModel.updateStatus(booking.id, 'hold');
+
+  const paymentFail = await processPaymentEvent(
+    {
+      gateway_event_id: `evt_fail_multi_${booking.id}`,
+      status: 'FAILED',
+      metadata: { booking_id: booking.id }
+    },
+    { redisClient: client }
+  );
+  assert.strictEqual(paymentFail.idempotent, false);
+
+  for (const lockKey of lockKeys) {
+    assert.strictEqual(await client.exists(lockKey), 0);
+  }
+
+  const updated = await bookingModel.findById(booking.id);
+  assert.strictEqual(updated.status, 'expired');
+});

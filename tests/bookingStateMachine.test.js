@@ -63,7 +63,7 @@ function listJsFiles(dir) {
 }
 
 async function createHoldBooking(trip, overrides = {}) {
-  const lockKey = `lock:seat:${trip.id}:${trip.journey_date}:${trip.departure_time}`;
+  const lockKey = `lock:trip:${trip.id}:seat:1`;
   return bookingModel.create({
     customer_name: overrides.customer_name || 'State Machine',
     customer_phone: overrides.customer_phone || `900${Date.now()}`,

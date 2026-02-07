@@ -6,6 +6,11 @@ const routeModel = require('../models/route');
 const messageLogModel = require('../models/messageLog');
 const whatsappService = require('../services/whatsapp');
 const { getDatabase } = require('../database');
+const { createClient } = require('redis');
+const { InventoryLockService } = require('../services/redis/InventoryLockService');
+const { getLockKeysForBooking, releaseLockKeys } = require('../services/inventoryLocking');
+
+const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 
 /**
  * Get the first route from database (default route for bookings)
@@ -220,8 +225,28 @@ router.post('/confirm', async (req, res) => {
       });
     }
 
-    // Update booking status
-    const updatedBooking = await bookingModel.transitionStatus(booking.id, 'confirmed');
+    const redisClient = createClient({ url: REDIS_URL });
+    await redisClient.connect();
+    const lockService = new InventoryLockService(redisClient);
+    const lockKeys = getLockKeysForBooking(booking);
+
+    let updatedBooking = null;
+    try {
+      // Update booking status
+      updatedBooking = await bookingModel.transitionStatus(booking.id, 'confirmed', {
+        releaseInventoryLock: async () =>
+          releaseLockKeys(lockService, lockKeys, {
+            bookingId: booking.id,
+            reason: 'confirm'
+          })
+      });
+    } finally {
+      try {
+        await redisClient.quit();
+      } catch (error) {
+        redisClient.disconnect();
+      }
+    }
     
     if (!updatedBooking) {
       return res.status(500).json({
@@ -320,8 +345,28 @@ router.post('/reject', async (req, res) => {
       });
     }
 
-    // Update booking status
-    const updatedBooking = await bookingModel.transitionStatus(booking.id, 'cancelled');
+    const redisClient = createClient({ url: REDIS_URL });
+    await redisClient.connect();
+    const lockService = new InventoryLockService(redisClient);
+    const lockKeys = getLockKeysForBooking(booking);
+
+    let updatedBooking = null;
+    try {
+      // Update booking status
+      updatedBooking = await bookingModel.transitionStatus(booking.id, 'cancelled', {
+        releaseInventoryLock: async () =>
+          releaseLockKeys(lockService, lockKeys, {
+            bookingId: booking.id,
+            reason: 'cancel'
+          })
+      });
+    } finally {
+      try {
+        await redisClient.quit();
+      } catch (error) {
+        redisClient.disconnect();
+      }
+    }
     
     if (!updatedBooking) {
       return res.status(500).json({

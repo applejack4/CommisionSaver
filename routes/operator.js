@@ -4,6 +4,7 @@ const bookingModel = require('../models/booking');
 const { getDatabase } = require('../database');
 const operatorTakeoverModel = require('../models/operatorTakeover');
 const auditEventModel = require('../models/auditEvent');
+const { buildSeatLockKey, getLockKeysForBooking } = require('../services/inventoryLocking');
 
 const DEFAULT_LIMIT = 50;
 
@@ -317,7 +318,7 @@ function buildMockBooking(bookingId) {
     departure_time: '09:00',
     price_amount: 1200,
     price_currency: 'INR',
-    lock_key: `lock:seat:mock`,
+    lock_key: `lock:trip:mock:seat:1`,
     lock_expires_at: now,
     ticket_media_id: null,
     created_at: now,
@@ -487,10 +488,16 @@ router.get('/bookings/:booking_id', async (req, res) => {
         departure_time: booking.departure_time || null,
         price_amount: booking.price ?? null,
         price_currency: booking.price != null ? 'INR' : null,
-        lock_key: booking.lock_key
-          || (booking.trip_id
-            ? `lock:seat:${booking.trip_id}:${booking.journey_date}:${booking.departure_time}`
-            : 'lock:seat:unknown'),
+        lock_key: (() => {
+          const lockKeys = getLockKeysForBooking(booking);
+          if (lockKeys.length > 0) {
+            return lockKeys[0];
+          }
+          if (booking.trip_id) {
+            return buildSeatLockKey(booking.trip_id, 1);
+          }
+          return 'lock:trip:unknown:seat:unknown';
+        })(),
         lock_expires_at: booking.hold_expires_at
           ? toIsoTimestamp(booking.hold_expires_at)
           : null,
