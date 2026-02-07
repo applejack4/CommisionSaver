@@ -5,8 +5,22 @@ const { getDatabase } = require('../database');
 const operatorTakeoverModel = require('../models/operatorTakeover');
 const auditEventModel = require('../models/auditEvent');
 const { buildSeatLockKey, getLockKeysForBooking } = require('../services/inventoryLocking');
+const { withIdempotency } = require('../services/idempotency/with_idempotency');
+const { RetryLaterError } = require('../services/idempotency/retry_later_error');
 
 const DEFAULT_LIMIT = 50;
+
+function requireIdempotencyKey(req, res) {
+  const key = req.get('X-Idempotency-Key');
+  if (!key) {
+    res.status(400).json({
+      success: false,
+      error: 'IDEMPOTENCY_KEY_REQUIRED'
+    });
+    return null;
+  }
+  return key;
+}
 
 function toIsoTimestamp(value) {
   if (!value) return null;
@@ -520,83 +534,87 @@ router.get('/bookings/:booking_id', async (req, res) => {
  * POST /operator/sessions/:session_id/takeover - Start operator takeover
  */
 router.post('/sessions/:session_id/takeover', async (req, res) => {
+  const idempotencyKey = requireIdempotencyKey(req, res);
+  if (!idempotencyKey) return;
+
   try {
-    const sessionId = req.params.session_id;
-    const { operator_id: operatorId, reason = null, idempotency_key: idempotencyKey = null } = req.body || {};
+    const response = await withIdempotency({
+      source: 'operator',
+      eventType: 'takeover_start',
+      idempotencyKey,
+      request: { params: req.params, body: req.body },
+      handler: async () => {
+        const sessionId = req.params.session_id;
+        const { operator_id: operatorId, reason = null } = req.body || {};
 
-    if (!operatorId) {
-      res.status(400).json({
-        success: false,
-        error: 'operator_id is required'
-      });
-      return;
-    }
+        if (!operatorId) {
+          return {
+            status: 400,
+            body: { success: false, error: 'operator_id is required' }
+          };
+        }
 
-    if (!sessionId) {
-      res.status(400).json({
-        success: false,
-        error: 'session_id is required'
-      });
-      return;
-    }
+        if (!sessionId) {
+          return {
+            status: 400,
+            body: { success: false, error: 'session_id is required' }
+          };
+        }
 
-    if (idempotencyKey) {
-      const existingEvent = await auditEventModel.findByIdempotencyKey(
-        sessionId,
-        idempotencyKey,
-        'TAKEOVER_STARTED'
-      );
-      if (existingEvent?.payload) {
-        res.status(200).json({
-          success: true,
-          takeover: JSON.parse(existingEvent.payload)
+        const activeTakeover = await operatorTakeoverModel.findActiveBySession(sessionId);
+        if (activeTakeover) {
+          if (activeTakeover.operator_id !== operatorId) {
+            return {
+              status: 409,
+              body: {
+                success: false,
+                error: 'TAKEOVER_ALREADY_ACTIVE',
+                assigned_operator_id: activeTakeover.operator_id
+              }
+            };
+          }
+
+          const takeoverPayload = buildTakeoverPayload(activeTakeover, 'ACTIVE');
+          return {
+            status: 200,
+            body: { success: true, takeover: takeoverPayload }
+          };
+        }
+
+        const bookingId = parseBookingIdFromSessionId(sessionId);
+        const takeover = await operatorTakeoverModel.createTakeover({
+          session_id: sessionId,
+          booking_id: bookingId,
+          operator_id: operatorId,
+          reason
         });
-        return;
-      }
-    }
 
-    const activeTakeover = await operatorTakeoverModel.findActiveBySession(sessionId);
-    if (activeTakeover) {
-      if (activeTakeover.operator_id !== operatorId) {
-        res.status(409).json({
-          success: false,
-          error: 'TAKEOVER_ALREADY_ACTIVE',
-          assigned_operator_id: activeTakeover.operator_id
+        const takeoverPayload = buildTakeoverPayload(takeover, 'ACTIVE');
+        await auditEventModel.create({
+          event_type: 'TAKEOVER_STARTED',
+          session_id: sessionId,
+          operator_id: operatorId,
+          takeover_id: takeover.id,
+          idempotency_key: idempotencyKey,
+          payload: takeoverPayload
         });
-        return;
+
+        return {
+          status: 200,
+          body: { success: true, takeover: takeoverPayload }
+        };
       }
-
-      const takeoverPayload = buildTakeoverPayload(activeTakeover, 'ACTIVE');
-      res.status(200).json({
-        success: true,
-        takeover: takeoverPayload
-      });
-      return;
-    }
-
-    const bookingId = parseBookingIdFromSessionId(sessionId);
-    const takeover = await operatorTakeoverModel.createTakeover({
-      session_id: sessionId,
-      booking_id: bookingId,
-      operator_id: operatorId,
-      reason
     });
 
-    const takeoverPayload = buildTakeoverPayload(takeover, 'ACTIVE');
-    await auditEventModel.create({
-      event_type: 'TAKEOVER_STARTED',
-      session_id: sessionId,
-      operator_id: operatorId,
-      takeover_id: takeover.id,
-      idempotency_key: idempotencyKey,
-      payload: takeoverPayload
-    });
-
-    res.status(200).json({
-      success: true,
-      takeover: takeoverPayload
-    });
+    res.status(response.status).json(response.body);
   } catch (error) {
+    if (error instanceof RetryLaterError) {
+      res.status(error.statusCode || 409).json({
+        success: false,
+        error: 'RETRY_LATER'
+      });
+      return;
+    }
     console.error('Error starting operator takeover:', error);
     res.status(500).json({
       success: false,
@@ -610,121 +628,124 @@ router.post('/sessions/:session_id/takeover', async (req, res) => {
  * PATCH /operator/sessions/:session_id/takeover - Update takeover (release/resume)
  */
 router.patch('/sessions/:session_id/takeover', async (req, res) => {
+  const idempotencyKey = requireIdempotencyKey(req, res);
+  if (!idempotencyKey) return;
+
   try {
     const sessionId = req.params.session_id;
-    const { action, idempotency_key: idempotencyKey = null } = req.body || {};
+    const { action } = req.body || {};
+    const eventType = action === 'release' ? 'takeover_release' : 'takeover_resume';
 
-    if (!sessionId) {
-      res.status(400).json({
-        success: false,
-        error: 'session_id is required'
-      });
-      return;
-    }
-
-    if (!action || !['release', 'resume'].includes(action)) {
-      res.status(400).json({
-        success: false,
-        error: 'action must be release or resume'
-      });
-      return;
-    }
-
-    const eventType = action === 'release' ? 'TAKEOVER_RELEASED' : 'TAKEOVER_RESUMED';
-    if (idempotencyKey) {
-      const existingEvent = await auditEventModel.findByIdempotencyKey(
-        sessionId,
-        idempotencyKey,
-        eventType
-      );
-      if (existingEvent?.payload) {
-        res.status(200).json({
-          success: true,
-          takeover: JSON.parse(existingEvent.payload)
-        });
-        return;
-      }
-    }
-
-    const activeTakeover = await operatorTakeoverModel.findActiveBySession(sessionId);
-    if (action === 'release') {
-      if (!activeTakeover) {
-        const latest = await operatorTakeoverModel.findLatestBySession(sessionId);
-        if (!latest) {
-          res.status(404).json({
-            success: false,
-            error: 'TAKEOVER_NOT_FOUND'
-          });
-          return;
+    const response = await withIdempotency({
+      source: 'operator',
+      eventType,
+      idempotencyKey,
+      request: { params: req.params, body: req.body },
+      handler: async () => {
+        if (!sessionId) {
+          return {
+            status: 400,
+            body: { success: false, error: 'session_id is required' }
+          };
         }
-        const takeoverPayload = buildTakeoverPayload(latest, 'RELEASED');
-        res.status(200).json({
-          success: true,
-          takeover: takeoverPayload
-        });
-        return;
+
+        if (!action || !['release', 'resume'].includes(action)) {
+          return {
+            status: 400,
+            body: { success: false, error: 'action must be release or resume' }
+          };
+        }
+
+        const activeTakeover = await operatorTakeoverModel.findActiveBySession(sessionId);
+        if (action === 'release') {
+          if (!activeTakeover) {
+            const latest = await operatorTakeoverModel.findLatestBySession(sessionId);
+            if (!latest) {
+              return {
+                status: 404,
+                body: { success: false, error: 'TAKEOVER_NOT_FOUND' }
+              };
+            }
+            const takeoverPayload = buildTakeoverPayload(latest, 'RELEASED');
+            return {
+              status: 200,
+              body: { success: true, takeover: takeoverPayload }
+            };
+          }
+
+          const released = await operatorTakeoverModel.releaseTakeover(activeTakeover.id);
+          const takeoverPayload = buildTakeoverPayload(released, 'RELEASED');
+          await auditEventModel.create({
+            event_type: 'TAKEOVER_RELEASED',
+            session_id: sessionId,
+            operator_id: released.operator_id,
+            takeover_id: released.id,
+            idempotency_key: idempotencyKey,
+            payload: takeoverPayload
+          });
+
+          return {
+            status: 200,
+            body: { success: true, takeover: takeoverPayload }
+          };
+        }
+
+        if (action === 'resume') {
+          if (activeTakeover) {
+            const takeoverPayload = buildTakeoverPayload(activeTakeover, 'ACTIVE');
+            return {
+              status: 200,
+              body: { success: true, takeover: takeoverPayload }
+            };
+          }
+
+          const latest = await operatorTakeoverModel.findLatestBySession(sessionId);
+          if (!latest) {
+            return {
+              status: 404,
+              body: { success: false, error: 'TAKEOVER_NOT_FOUND' }
+            };
+          }
+
+          const bookingId = parseBookingIdFromSessionId(sessionId);
+          const resumed = await operatorTakeoverModel.createTakeover({
+            session_id: sessionId,
+            booking_id: bookingId,
+            operator_id: latest.operator_id,
+            reason: 'resume'
+          });
+          const takeoverPayload = buildTakeoverPayload(resumed, 'ACTIVE');
+          await auditEventModel.create({
+            event_type: 'TAKEOVER_RESUMED',
+            session_id: sessionId,
+            operator_id: resumed.operator_id,
+            takeover_id: resumed.id,
+            idempotency_key: idempotencyKey,
+            payload: takeoverPayload
+          });
+
+          return {
+            status: 200,
+            body: { success: true, takeover: takeoverPayload }
+          };
+        }
+
+        return {
+          status: 400,
+          body: { success: false, error: 'action must be release or resume' }
+        };
       }
+    });
 
-      const released = await operatorTakeoverModel.releaseTakeover(activeTakeover.id);
-      const takeoverPayload = buildTakeoverPayload(released, 'RELEASED');
-      await auditEventModel.create({
-        event_type: 'TAKEOVER_RELEASED',
-        session_id: sessionId,
-        operator_id: released.operator_id,
-        takeover_id: released.id,
-        idempotency_key: idempotencyKey,
-        payload: takeoverPayload
-      });
-
-      res.status(200).json({
-        success: true,
-        takeover: takeoverPayload
+    res.status(response.status).json(response.body);
+  } catch (error) {
+    if (error instanceof RetryLaterError) {
+      res.status(error.statusCode || 409).json({
+        success: false,
+        error: 'RETRY_LATER'
       });
       return;
     }
-
-    if (action === 'resume') {
-      if (activeTakeover) {
-        const takeoverPayload = buildTakeoverPayload(activeTakeover, 'ACTIVE');
-        res.status(200).json({
-          success: true,
-          takeover: takeoverPayload
-        });
-        return;
-      }
-
-      const latest = await operatorTakeoverModel.findLatestBySession(sessionId);
-      if (!latest) {
-        res.status(404).json({
-          success: false,
-          error: 'TAKEOVER_NOT_FOUND'
-        });
-        return;
-      }
-
-      const bookingId = parseBookingIdFromSessionId(sessionId);
-      const resumed = await operatorTakeoverModel.createTakeover({
-        session_id: sessionId,
-        booking_id: bookingId,
-        operator_id: latest.operator_id,
-        reason: 'resume'
-      });
-      const takeoverPayload = buildTakeoverPayload(resumed, 'ACTIVE');
-      await auditEventModel.create({
-        event_type: 'TAKEOVER_RESUMED',
-        session_id: sessionId,
-        operator_id: resumed.operator_id,
-        takeover_id: resumed.id,
-        idempotency_key: idempotencyKey,
-        payload: takeoverPayload
-      });
-
-      res.status(200).json({
-        success: true,
-        takeover: takeoverPayload
-      });
-    }
-  } catch (error) {
     console.error('Error updating operator takeover:', error);
     res.status(500).json({
       success: false,

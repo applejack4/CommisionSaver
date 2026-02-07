@@ -169,17 +169,25 @@ function initializeDatabase() {
                     }
                     console.log('Operator takeovers table created/verified');
 
-                    // Audit events table (append-only)
+                    // Audit events table (append-only, idempotency source of truth)
                     db.run(`
                       CREATE TABLE IF NOT EXISTS audit_events (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+                        source TEXT,
                         event_type TEXT NOT NULL,
+                        idempotency_key TEXT,
+                        entity_type TEXT,
+                        entity_id TEXT,
+                        status TEXT,
+                        request_hash TEXT,
+                        response_snapshot TEXT,
+                        error_snapshot TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        completed_at DATETIME,
                         session_id TEXT,
                         operator_id TEXT,
                         takeover_id INTEGER,
-                        idempotency_key TEXT,
                         payload TEXT,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (takeover_id) REFERENCES operator_takeovers(id) ON DELETE SET NULL
                       )
                     `, (err) => {
@@ -221,152 +229,339 @@ function initializeDatabase() {
  * @param {sqlite3.Database} db Database instance
  * @returns {Promise<void>}
  */
-function runMigrations(db) {
+function migrateAuditEventsSchema(db) {
   return new Promise((resolve, reject) => {
-    // First, check the current schema
-    db.all("PRAGMA table_info(bookings)", (err, rows) => {
+    db.all("PRAGMA table_info(audit_events)", (err, rows) => {
       if (err) {
-        console.error('Error checking bookings table structure:', err.message);
-        resolve(); // Continue anyway
+        console.error('Error checking audit_events table structure:', err.message);
+        resolve();
+        return;
+      }
+      const columns = Array.isArray(rows) ? rows : [];
+      const columnMap = new Map(columns.map(col => [col.name, col]));
+      const requiredColumns = [
+        'id',
+        'source',
+        'event_type',
+        'idempotency_key',
+        'entity_type',
+        'entity_id',
+        'status',
+        'request_hash',
+        'response_snapshot',
+        'error_snapshot',
+        'created_at',
+        'completed_at'
+      ];
+      const missingRequired = requiredColumns.filter(name => !columnMap.has(name));
+      const idColumn = columnMap.get('id');
+      const idType = (idColumn?.type || '').toUpperCase();
+      const needsRebuild = missingRequired.length > 0 || (idColumn && !idType.includes('TEXT'));
+
+      const createAuditEventsTable = () => new Promise((resolveCreate, rejectCreate) => {
+        db.run(
+          `CREATE TABLE IF NOT EXISTS audit_events (
+            id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+            source TEXT,
+            event_type TEXT NOT NULL,
+            idempotency_key TEXT,
+            entity_type TEXT,
+            entity_id TEXT,
+            status TEXT,
+            request_hash TEXT,
+            response_snapshot TEXT,
+            error_snapshot TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            completed_at DATETIME,
+            session_id TEXT,
+            operator_id TEXT,
+            takeover_id INTEGER,
+            payload TEXT,
+            FOREIGN KEY (takeover_id) REFERENCES operator_takeovers(id) ON DELETE SET NULL
+          )`,
+          (createErr) => {
+            if (createErr) {
+              rejectCreate(createErr);
+              return;
+            }
+            db.run(
+              `CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_events_idempotency
+               ON audit_events (source, event_type, idempotency_key)`,
+              (indexErr) => {
+                if (indexErr) {
+                  rejectCreate(indexErr);
+                  return;
+                }
+                resolveCreate();
+              }
+            );
+          }
+        );
+      });
+
+      if (needsRebuild) {
+        db.serialize(() => {
+          db.run('ALTER TABLE audit_events RENAME TO audit_events_legacy', (renameErr) => {
+            if (renameErr) {
+              reject(renameErr);
+              return;
+            }
+            createAuditEventsTable()
+              .then(() => {
+                db.run(
+                  `INSERT INTO audit_events (
+                    id,
+                    source,
+                    event_type,
+                    idempotency_key,
+                    entity_type,
+                    entity_id,
+                    status,
+                    request_hash,
+                    response_snapshot,
+                    error_snapshot,
+                    created_at,
+                    completed_at,
+                    session_id,
+                    operator_id,
+                    takeover_id,
+                    payload
+                  )
+                  SELECT
+                    lower(hex(randomblob(16))),
+                    NULL,
+                    event_type,
+                    idempotency_key,
+                    NULL,
+                    NULL,
+                    'completed',
+                    NULL,
+                    payload,
+                    NULL,
+                    created_at,
+                    created_at,
+                    session_id,
+                    operator_id,
+                    takeover_id,
+                    payload
+                  FROM audit_events_legacy`,
+                  (copyErr) => {
+                    if (copyErr) {
+                      reject(copyErr);
+                      return;
+                    }
+                    db.run('DROP TABLE audit_events_legacy', (dropErr) => {
+                      if (dropErr) {
+                        reject(dropErr);
+                        return;
+                      }
+                      resolve();
+                    });
+                  }
+                );
+              })
+              .catch(reject);
+          });
+        });
         return;
       }
 
-      // Handle case where rows might be undefined or empty
-      if (!rows || !Array.isArray(rows)) {
-        rows = [];
-      }
-
-      const columnNames = rows.map(row => row.name);
-      const hasTripId = columnNames.includes('trip_id');
-      const hasRouteId = columnNames.includes('route_id');
-      const hasHoldExpiresAt = columnNames.includes('hold_expires_at');
-      const hasTicketAttachmentId = columnNames.includes('ticket_attachment_id');
-      const hasTicketReceivedAt = columnNames.includes('ticket_received_at');
-      const hasLockKey = columnNames.includes('lock_key');
-      const hasLockKeys = columnNames.includes('lock_keys');
-      const hasSeatNumbers = columnNames.includes('seat_numbers');
-
-      const finalize = () => {
-        db.serialize(() => {
-          db.run(
-            `UPDATE bookings
-             SET status = 'hold'
-             WHERE LOWER(status) IN ('pending', 'payment_pending')`
-          );
-          db.run(
-            `UPDATE bookings
-             SET status = 'cancelled'
-             WHERE LOWER(status) IN ('rejected')`,
-            (normalizeErr) => {
-              if (normalizeErr) {
-                console.error('Error normalizing booking statuses:', normalizeErr.message);
-              }
-              resolve();
-            }
-          );
-        });
-      };
+      const addColumn = (columnSql) => new Promise((resolveAdd) => {
+        db.run(columnSql, () => resolveAdd());
+      });
 
       db.serialize(() => {
-        // Migration: Add trip_id column if it doesn't exist
-        if (!hasTripId) {
-          db.run(`
-            ALTER TABLE bookings 
-            ADD COLUMN trip_id INTEGER
-          `, (err) => {
-            if (err) {
-              console.error('Error adding trip_id column:', err.message);
-            } else {
-              console.log('Added trip_id column to bookings table');
-            }
-          });
+        const additions = [];
+        if (!columnMap.has('source')) {
+          additions.push(addColumn(`ALTER TABLE audit_events ADD COLUMN source TEXT`));
+        }
+        if (!columnMap.has('idempotency_key')) {
+          additions.push(addColumn(`ALTER TABLE audit_events ADD COLUMN idempotency_key TEXT`));
+        }
+        if (!columnMap.has('entity_type')) {
+          additions.push(addColumn(`ALTER TABLE audit_events ADD COLUMN entity_type TEXT`));
+        }
+        if (!columnMap.has('entity_id')) {
+          additions.push(addColumn(`ALTER TABLE audit_events ADD COLUMN entity_id TEXT`));
+        }
+        if (!columnMap.has('status')) {
+          additions.push(addColumn(`ALTER TABLE audit_events ADD COLUMN status TEXT`));
+        }
+        if (!columnMap.has('request_hash')) {
+          additions.push(addColumn(`ALTER TABLE audit_events ADD COLUMN request_hash TEXT`));
+        }
+        if (!columnMap.has('response_snapshot')) {
+          additions.push(addColumn(`ALTER TABLE audit_events ADD COLUMN response_snapshot TEXT`));
+        }
+        if (!columnMap.has('error_snapshot')) {
+          additions.push(addColumn(`ALTER TABLE audit_events ADD COLUMN error_snapshot TEXT`));
+        }
+        if (!columnMap.has('completed_at')) {
+          additions.push(addColumn(`ALTER TABLE audit_events ADD COLUMN completed_at DATETIME`));
         }
 
-        // Migration: Add hold_expires_at column to bookings if it doesn't exist
-        if (!hasHoldExpiresAt) {
-          db.run(`
-            ALTER TABLE bookings 
-            ADD COLUMN hold_expires_at DATETIME
-          `, (err) => {
-            if (err) {
-              console.error('Error adding hold_expires_at column:', err.message);
-            } else {
-              console.log('Added hold_expires_at column to bookings table');
-            }
-          });
-        }
-
-        // Migration: Add ticket_attachment_id column to bookings if it doesn't exist
-        if (!hasTicketAttachmentId) {
-          db.run(`
-            ALTER TABLE bookings 
-            ADD COLUMN ticket_attachment_id TEXT
-          `, (err) => {
-            if (err) {
-              console.error('Error adding ticket_attachment_id column:', err.message);
-            } else {
-              console.log('Added ticket_attachment_id column to bookings table');
-            }
-          });
-        }
-
-        // Migration: Add ticket_received_at column to bookings if it doesn't exist
-        if (!hasTicketReceivedAt) {
-          db.run(`
-            ALTER TABLE bookings 
-            ADD COLUMN ticket_received_at DATETIME
-          `, (err) => {
-            if (err) {
-              console.error('Error adding ticket_received_at column:', err.message);
-            } else {
-              console.log('Added ticket_received_at column to bookings table');
-            }
-            finalize();
-          });
-        } else {
-          finalize();
-        }
-
-        if (!hasLockKey) {
-          db.run(`
-            ALTER TABLE bookings 
-            ADD COLUMN lock_key TEXT
-          `, (err) => {
-            if (err) {
-              console.error('Error adding lock_key column:', err.message);
-            } else {
-              console.log('Added lock_key column to bookings table');
-            }
-          });
-        }
-
-        if (!hasLockKeys) {
-          db.run(`
-            ALTER TABLE bookings 
-            ADD COLUMN lock_keys TEXT
-          `, (err) => {
-            if (err) {
-              console.error('Error adding lock_keys column:', err.message);
-            } else {
-              console.log('Added lock_keys column to bookings table');
-            }
-          });
-        }
-
-        if (!hasSeatNumbers) {
-          db.run(`
-            ALTER TABLE bookings 
-            ADD COLUMN seat_numbers TEXT
-          `, (err) => {
-            if (err) {
-              console.error('Error adding seat_numbers column:', err.message);
-            } else {
-              console.log('Added seat_numbers column to bookings table');
-            }
-          });
-        }
+        Promise.all(additions)
+          .then(createAuditEventsTable)
+          .then(resolve)
+          .catch(reject);
       });
     });
+  });
+}
+
+function runMigrations(db) {
+  return new Promise((resolve, reject) => {
+    migrateAuditEventsSchema(db)
+      .then(() => {
+        // First, check the current schema
+        db.all("PRAGMA table_info(bookings)", (err, rows) => {
+          if (err) {
+            console.error('Error checking bookings table structure:', err.message);
+            resolve(); // Continue anyway
+            return;
+          }
+
+          // Handle case where rows might be undefined or empty
+          if (!rows || !Array.isArray(rows)) {
+            rows = [];
+          }
+
+          const columnNames = rows.map(row => row.name);
+          const hasTripId = columnNames.includes('trip_id');
+          const hasRouteId = columnNames.includes('route_id');
+          const hasHoldExpiresAt = columnNames.includes('hold_expires_at');
+          const hasTicketAttachmentId = columnNames.includes('ticket_attachment_id');
+          const hasTicketReceivedAt = columnNames.includes('ticket_received_at');
+          const hasLockKey = columnNames.includes('lock_key');
+          const hasLockKeys = columnNames.includes('lock_keys');
+          const hasSeatNumbers = columnNames.includes('seat_numbers');
+
+          const finalize = () => {
+            db.serialize(() => {
+              db.run(
+                `UPDATE bookings
+                 SET status = 'hold'
+                 WHERE LOWER(status) IN ('pending', 'payment_pending')`
+              );
+              db.run(
+                `UPDATE bookings
+                 SET status = 'cancelled'
+                 WHERE LOWER(status) IN ('rejected')`,
+                (normalizeErr) => {
+                  if (normalizeErr) {
+                    console.error('Error normalizing booking statuses:', normalizeErr.message);
+                  }
+                  resolve();
+                }
+              );
+            });
+          };
+
+          db.serialize(() => {
+            // Migration: Add trip_id column if it doesn't exist
+            if (!hasTripId) {
+              db.run(`
+                ALTER TABLE bookings 
+                ADD COLUMN trip_id INTEGER
+              `, (err) => {
+                if (err) {
+                  console.error('Error adding trip_id column:', err.message);
+                } else {
+                  console.log('Added trip_id column to bookings table');
+                }
+              });
+            }
+
+            // Migration: Add hold_expires_at column to bookings if it doesn't exist
+            if (!hasHoldExpiresAt) {
+              db.run(`
+                ALTER TABLE bookings 
+                ADD COLUMN hold_expires_at DATETIME
+              `, (err) => {
+                if (err) {
+                  console.error('Error adding hold_expires_at column:', err.message);
+                } else {
+                  console.log('Added hold_expires_at column to bookings table');
+                }
+              });
+            }
+
+            // Migration: Add ticket_attachment_id column to bookings if it doesn't exist
+            if (!hasTicketAttachmentId) {
+              db.run(`
+                ALTER TABLE bookings 
+                ADD COLUMN ticket_attachment_id TEXT
+              `, (err) => {
+                if (err) {
+                  console.error('Error adding ticket_attachment_id column:', err.message);
+                } else {
+                  console.log('Added ticket_attachment_id column to bookings table');
+                }
+              });
+            }
+
+            // Migration: Add ticket_received_at column to bookings if it doesn't exist
+            if (!hasTicketReceivedAt) {
+              db.run(`
+                ALTER TABLE bookings 
+                ADD COLUMN ticket_received_at DATETIME
+              `, (err) => {
+                if (err) {
+                  console.error('Error adding ticket_received_at column:', err.message);
+                } else {
+                  console.log('Added ticket_received_at column to bookings table');
+                }
+                finalize();
+              });
+            } else {
+              finalize();
+            }
+
+            if (!hasLockKey) {
+              db.run(`
+                ALTER TABLE bookings 
+                ADD COLUMN lock_key TEXT
+              `, (err) => {
+                if (err) {
+                  console.error('Error adding lock_key column:', err.message);
+                } else {
+                  console.log('Added lock_key column to bookings table');
+                }
+              });
+            }
+
+            if (!hasLockKeys) {
+              db.run(`
+                ALTER TABLE bookings 
+                ADD COLUMN lock_keys TEXT
+              `, (err) => {
+                if (err) {
+                  console.error('Error adding lock_keys column:', err.message);
+                } else {
+                  console.log('Added lock_keys column to bookings table');
+                }
+              });
+            }
+
+            if (!hasSeatNumbers) {
+              db.run(`
+                ALTER TABLE bookings 
+                ADD COLUMN seat_numbers TEXT
+              `, (err) => {
+                if (err) {
+                  console.error('Error adding seat_numbers column:', err.message);
+                } else {
+                  console.log('Added seat_numbers column to bookings table');
+                }
+              });
+            }
+          });
+        });
+      })
+      .catch((migrationError) => {
+        console.error('Error running migrations:', migrationError.message);
+        resolve();
+      });
   });
 }
 

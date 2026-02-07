@@ -40,15 +40,6 @@ async function processPaymentEvent(payload, { redisClient }) {
   // #region agent log
   fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'P',location:'payment_processor.js:39',message:'processPaymentEvent entry',data:{bookingId,gatewayEventId,status:payload?.status,redisIsOpen:redisClient?.isOpen,redisIsReady:redisClient?.isReady},timestamp:Date.now()})}).catch(()=>{});
   // #endregion
-  const existing = await auditEventModel.findByIdempotencyKey(
-    sessionId,
-    gatewayEventId,
-    'PAYMENT_WEBHOOK'
-  );
-  if (existing) {
-    return { idempotent: true, bookingId, status: payload.status };
-  }
-
   const booking = await bookingModel.findById(bookingId);
   if (!booking) {
     throw new Error(`Booking ${bookingId} not found`);

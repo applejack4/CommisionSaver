@@ -16,6 +16,8 @@ const {
   getLockKeysForBooking,
   releaseLockKeys
 } = require('../services/inventoryLocking');
+const { withIdempotency } = require('../services/idempotency/with_idempotency');
+const { RetryLaterError } = require('../services/idempotency/retry_later_error');
 
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
 const HOLD_DURATION_MINUTES = parseInt(process.env.HOLD_DURATION_MINUTES || '10', 10);
@@ -164,40 +166,64 @@ router.post('/whatsapp/webhook', async (req, res) => {
       const from = message.from;
       const messageType = message.type;
       const normalizedFrom = normalizePhoneNumber(from);
+      const wamid = message.id || message.wamid || message.message_id || 'unknown';
+      const intent = messageType || 'unknown';
+      const idempotencyKey = `${wamid}:${intent}`;
 
       console.log(`Received ${messageType} message from ${normalizedFrom} (original: ${from})`);
 
-      // Identify sender: operator or customer
-      try {
-        const operator = await operatorModel.findByPhone(normalizedFrom);
-        
-        if (operator) {
-          console.log(`Identified as operator: ${operator.name} (ID: ${operator.id})`);
-          // Operator message handling
-          await handleOperatorMessage(normalizedFrom, message, messageType);
-        } else {
-          console.log(`Identified as customer: ${normalizedFrom}`);
-          // Customer message handling
-          if (messageType === 'text') {
-            const messageText = message.text?.body || '';
-            console.log(`Customer message text: "${messageText}"`);
-            await handleCustomerMessage(normalizedFrom, messageText);
+      const handleMessageOnce = async () => {
+        // Identify sender: operator or customer
+        try {
+          const operator = await operatorModel.findByPhone(normalizedFrom);
+
+          if (operator) {
+            console.log(`Identified as operator: ${operator.name} (ID: ${operator.id})`);
+            // Operator message handling
+            await handleOperatorMessage(normalizedFrom, message, messageType);
           } else {
-            console.log(`Customer ${normalizedFrom} sent non-text message (${messageType}), ignoring`);
+            console.log(`Identified as customer: ${normalizedFrom}`);
+            // Customer message handling
+            if (messageType === 'text') {
+              const messageText = message.text?.body || '';
+              console.log(`Customer message text: "${messageText}"`);
+              await handleCustomerMessage(normalizedFrom, messageText);
+            } else {
+              console.log(`Customer ${normalizedFrom} sent non-text message (${messageType}), ignoring`);
+            }
+          }
+        } catch (handlerError) {
+          console.error('Error in message handler:', handlerError);
+          console.error('Stack trace:', handlerError.stack);
+          // Try to send error notification to user
+          try {
+            await whatsappService.sendMessage(
+              normalizedFrom,
+              'Sorry, there was an error processing your message. Please try again later.'
+            );
+          } catch (notifyError) {
+            console.error('Failed to send error notification:', notifyError.message);
           }
         }
-      } catch (handlerError) {
-        console.error('Error in message handler:', handlerError);
-        console.error('Stack trace:', handlerError.stack);
-        // Try to send error notification to user
-        try {
-          await whatsappService.sendMessage(
-            normalizedFrom,
-            'Sorry, there was an error processing your message. Please try again later.'
-          );
-        } catch (notifyError) {
-          console.error('Failed to send error notification:', notifyError.message);
+      };
+
+      try {
+        await withIdempotency({
+          source: 'whatsapp',
+          eventType: intent,
+          idempotencyKey,
+          request: body,
+          handler: handleMessageOnce
+        });
+      } catch (error) {
+        if (error instanceof RetryLaterError) {
+          console.warn('Duplicate WhatsApp message in-flight, skipping', {
+            wamid,
+            intent
+          });
+          return;
         }
+        console.error('Idempotency wrapper error:', error);
       }
     } else {
       console.log('No messages in webhook payload');
