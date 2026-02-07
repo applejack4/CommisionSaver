@@ -30,11 +30,11 @@ async function getFirstRoute() {
 }
 
 /**
- * Find the latest pending booking
+ * Find the latest hold booking
  * @param {number} bookingId - Optional booking ID to find specific booking
- * @returns {Promise<Object|null>} Latest pending booking or null if not found
+ * @returns {Promise<Object|null>} Latest hold booking or null if not found
  */
-async function getLatestPendingBooking(bookingId = null) {
+async function getLatestHoldBooking(bookingId = null) {
   const db = await getDatabase();
   
   if (bookingId) {
@@ -43,8 +43,10 @@ async function getLatestPendingBooking(bookingId = null) {
   
   return new Promise((resolve, reject) => {
     db.get(
-      'SELECT * FROM bookings WHERE status = ? ORDER BY created_at DESC LIMIT 1',
-      ['pending'],
+      `SELECT * FROM bookings
+       WHERE status = 'hold' AND hold_expires_at > datetime('now')
+       ORDER BY created_at DESC
+       LIMIT 1`,
       (err, row) => {
         if (err) {
           reject(err);
@@ -112,8 +114,7 @@ router.post('/create', async (req, res) => {
       customer_phone: customer_phone,
       route_id: route.id,
       journey_date: journeyDate,
-      seat_count: seat_count || 1, // Default seat count
-      status: 'pending'
+      seat_count: seat_count || 1 // Default seat count
     });
 
     console.log(`Booking created: ID ${booking.id} for customer ${customer_phone}`);
@@ -196,31 +197,31 @@ router.post('/create', async (req, res) => {
  * POST /booking/confirm - Confirm a booking (internal endpoint)
  * Request body:
  * - operator_phone (optional): Operator phone number (for logging)
- * - booking_id (optional): Specific booking ID to confirm (defaults to latest pending booking)
+ * - booking_id (optional): Specific booking ID to confirm (defaults to latest hold booking)
  */
 router.post('/confirm', async (req, res) => {
   try {
     const { operator_phone, booking_id } = req.body;
 
-    // Find pending booking (use provided booking_id or default to latest)
-    const booking = await getLatestPendingBooking(booking_id);
+    // Find hold booking (use provided booking_id or default to latest)
+    const booking = await getLatestHoldBooking(booking_id);
     
     if (!booking) {
       return res.status(404).json({
         success: false,
-        error: 'No pending bookings found for confirmation'
+        error: 'No active holds found for confirmation'
       });
     }
 
-    if (booking.status !== 'pending') {
+    if (booking.status !== 'hold') {
       return res.status(400).json({
         success: false,
-        error: `Booking ${booking.id} is not in pending status (current status: ${booking.status})`
+        error: `Booking ${booking.id} is not in hold status (current status: ${booking.status})`
       });
     }
 
     // Update booking status
-    const updatedBooking = await bookingModel.updateStatus(booking.id, 'confirmed');
+    const updatedBooking = await bookingModel.transitionStatus(booking.id, 'confirmed');
     
     if (!updatedBooking) {
       return res.status(500).json({
@@ -296,31 +297,31 @@ router.post('/confirm', async (req, res) => {
  * POST /booking/reject - Reject a booking (internal endpoint)
  * Request body:
  * - operator_phone (optional): Operator phone number (for logging)
- * - booking_id (optional): Specific booking ID to reject (defaults to latest pending booking)
+ * - booking_id (optional): Specific booking ID to reject (defaults to latest hold booking)
  */
 router.post('/reject', async (req, res) => {
   try {
     const { operator_phone, booking_id } = req.body;
 
-    // Find pending booking (use provided booking_id or default to latest)
-    const booking = await getLatestPendingBooking(booking_id);
+    // Find hold booking (use provided booking_id or default to latest)
+    const booking = await getLatestHoldBooking(booking_id);
     
     if (!booking) {
       return res.status(404).json({
         success: false,
-        error: 'No pending bookings found for rejection'
+        error: 'No active holds found for rejection'
       });
     }
 
-    if (booking.status !== 'pending') {
+    if (booking.status !== 'hold') {
       return res.status(400).json({
         success: false,
-        error: `Booking ${booking.id} is not in pending status (current status: ${booking.status})`
+        error: `Booking ${booking.id} is not in hold status (current status: ${booking.status})`
       });
     }
 
     // Update booking status
-    const updatedBooking = await bookingModel.updateStatus(booking.id, 'rejected');
+    const updatedBooking = await bookingModel.transitionStatus(booking.id, 'cancelled');
     
     if (!updatedBooking) {
       return res.status(500).json({

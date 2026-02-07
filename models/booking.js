@@ -1,5 +1,46 @@
 const { getDatabase } = require('../database');
 
+const BOOKING_STATUSES = Object.freeze({
+  HOLD: 'hold',
+  CONFIRMED: 'confirmed',
+  CANCELLED: 'cancelled',
+  EXPIRED: 'expired'
+});
+
+const LEGACY_STATUS_MAP = Object.freeze({
+  pending: BOOKING_STATUSES.HOLD,
+  payment_pending: BOOKING_STATUSES.HOLD,
+  rejected: BOOKING_STATUSES.CANCELLED
+});
+
+function normalizeStatus(status) {
+  if (!status) return null;
+  const normalized = String(status).trim().toLowerCase();
+  if (LEGACY_STATUS_MAP[normalized]) {
+    return LEGACY_STATUS_MAP[normalized];
+  }
+  if (Object.values(BOOKING_STATUSES).includes(normalized)) {
+    return normalized;
+  }
+  return null;
+}
+
+function isAllowedTransition(fromStatus, toStatus) {
+  if (!fromStatus || !toStatus) return false;
+  if (fromStatus === toStatus) return true;
+  if (fromStatus === BOOKING_STATUSES.HOLD) {
+    return [
+      BOOKING_STATUSES.CONFIRMED,
+      BOOKING_STATUSES.CANCELLED,
+      BOOKING_STATUSES.EXPIRED
+    ].includes(toStatus);
+  }
+  if (fromStatus === BOOKING_STATUSES.CONFIRMED) {
+    return toStatus === BOOKING_STATUSES.CANCELLED;
+  }
+  return false;
+}
+
 /**
  * Create a new booking with HOLD status
  * @param {Object} bookingData - Booking data
@@ -187,30 +228,68 @@ async function findActiveHolds() {
  * @param {string} status - New status ('hold', 'confirmed', 'expired')
  * @returns {Promise<Object|null>} Updated booking object or null if not found
  */
-async function updateStatus(id, status) {
+async function transitionStatus(id, status, options = {}) {
   const db = await getDatabase();
-  
+  const booking = await findById(id);
+  if (!booking) {
+    return null;
+  }
+
+  const currentStatus = normalizeStatus(booking.status);
+  const nextStatus = normalizeStatus(status);
+  if (!currentStatus || !nextStatus) {
+    throw new Error(`Invalid booking status transition: ${booking.status} -> ${status}`);
+  }
+  if (!isAllowedTransition(currentStatus, nextStatus)) {
+    throw new Error(`Disallowed booking status transition: ${currentStatus} -> ${nextStatus}`);
+  }
+
+  const setParts = ['status = ?'];
+  const values = [nextStatus];
+
+  if (nextStatus !== BOOKING_STATUSES.HOLD) {
+    setParts.push('hold_expires_at = NULL');
+  }
+
+  if (nextStatus === BOOKING_STATUSES.CONFIRMED) {
+    if (options.ticketAttachmentId) {
+      setParts.push('ticket_attachment_id = ?');
+      values.push(options.ticketAttachmentId);
+      setParts.push('ticket_received_at = datetime(\'now\')');
+    }
+  }
+
+  values.push(id);
+
+  const shouldReleaseLock =
+    currentStatus === BOOKING_STATUSES.HOLD && nextStatus !== BOOKING_STATUSES.HOLD;
+
   return new Promise((resolve, reject) => {
     db.run(
-      'UPDATE bookings SET status = ? WHERE id = ?',
-      [status, id],
-      function (err) {
+      `UPDATE bookings SET ${setParts.join(', ')} WHERE id = ?`,
+      values,
+      async function (err) {
         if (err) {
           reject(err);
           return;
         }
-        
-        if (this.changes === 0) {
-          resolve(null);
-          return;
+
+        try {
+          if (shouldReleaseLock && typeof options.releaseInventoryLock === 'function') {
+            await options.releaseInventoryLock();
+          }
+          const updated = await findById(id);
+          resolve(updated);
+        } catch (error) {
+          reject(error);
         }
-        
-        findById(id)
-          .then(booking => resolve(booking))
-          .catch(reject);
       }
     );
   });
+}
+
+async function updateStatus(id, status, options = {}) {
+  return transitionStatus(id, status, options);
 }
 
 /**
@@ -219,34 +298,10 @@ async function updateStatus(id, status) {
  * @param {string} ticketAttachmentId - WhatsApp media ID of ticket
  * @returns {Promise<Object|null>} Updated booking object
  */
-async function confirmWithTicket(id, ticketAttachmentId) {
-  const db = await getDatabase();
-  
-  return new Promise((resolve, reject) => {
-    db.run(
-      `UPDATE bookings 
-       SET status = 'confirmed', 
-           ticket_attachment_id = ?,
-           ticket_received_at = datetime('now'),
-           hold_expires_at = NULL
-       WHERE id = ?`,
-      [ticketAttachmentId, id],
-      function (err) {
-        if (err) {
-          reject(err);
-          return;
-        }
-        
-        if (this.changes === 0) {
-          resolve(null);
-          return;
-        }
-        
-        findById(id)
-          .then(booking => resolve(booking))
-          .catch(reject);
-      }
-    );
+async function confirmWithTicket(id, ticketAttachmentId, options = {}) {
+  return transitionStatus(id, BOOKING_STATUSES.CONFIRMED, {
+    ...options,
+    ticketAttachmentId
   });
 }
 
@@ -255,33 +310,8 @@ async function confirmWithTicket(id, ticketAttachmentId) {
  * @param {number} id - Booking ID
  * @returns {Promise<Object|null>} Updated booking object
  */
-async function expireHold(id) {
-  const db = await getDatabase();
-  
-  return new Promise((resolve, reject) => {
-    db.run(
-      `UPDATE bookings 
-       SET status = 'expired', 
-           hold_expires_at = NULL
-       WHERE id = ? AND status = 'hold'`,
-      [id],
-      function (err) {
-        if (err) {
-          reject(err);
-          return;
-        }
-        
-        if (this.changes === 0) {
-          resolve(null);
-          return;
-        }
-        
-        findById(id)
-          .then(booking => resolve(booking))
-          .catch(reject);
-      }
-    );
-  });
+async function expireHold(id, options = {}) {
+  return transitionStatus(id, BOOKING_STATUSES.EXPIRED, options);
 }
 
 /**
@@ -382,6 +412,8 @@ module.exports = {
   findActiveHolds,
   findExpiredHolds,
   updateStatus,
+  transitionStatus,
+  normalizeStatus,
   confirmWithTicket,
   expireHold,
   findByTripId,

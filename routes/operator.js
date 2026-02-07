@@ -32,9 +32,7 @@ function mapBookingState(status) {
       return 'CONFIRMED';
     case 'expired':
       return 'EXPIRED';
-    case 'pending':
-      return 'DRAFT';
-    case 'rejected':
+    case 'cancelled':
       return 'EXPIRED';
     default:
       return 'DRAFT';

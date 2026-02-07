@@ -242,6 +242,27 @@ function runMigrations(db) {
       const hasTicketReceivedAt = columnNames.includes('ticket_received_at');
       const hasLockKey = columnNames.includes('lock_key');
 
+      const finalize = () => {
+        db.serialize(() => {
+          db.run(
+            `UPDATE bookings
+             SET status = 'hold'
+             WHERE LOWER(status) IN ('pending', 'payment_pending')`
+          );
+          db.run(
+            `UPDATE bookings
+             SET status = 'cancelled'
+             WHERE LOWER(status) IN ('rejected')`,
+            (normalizeErr) => {
+              if (normalizeErr) {
+                console.error('Error normalizing booking statuses:', normalizeErr.message);
+              }
+              resolve();
+            }
+          );
+        });
+      };
+
       db.serialize(() => {
         // Migration: Add trip_id column if it doesn't exist
         if (!hasTripId) {
@@ -296,10 +317,10 @@ function runMigrations(db) {
             } else {
               console.log('Added ticket_received_at column to bookings table');
             }
-            resolve(); // Resolve after all migrations
+            finalize();
           });
         } else {
-          resolve(); // All columns already exist
+          finalize();
         }
 
         if (!hasLockKey) {

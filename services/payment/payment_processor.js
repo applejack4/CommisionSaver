@@ -53,6 +53,9 @@ async function processPaymentEvent(payload, { redisClient }) {
   if (!booking) {
     throw new Error(`Booking ${bookingId} not found`);
   }
+  if (bookingModel.normalizeStatus(booking.status) !== 'hold') {
+    return { idempotent: true, bookingId, status: payload.status };
+  }
 
   const normalizedStatus = normalizePaymentStatus(payload.status);
   const newBookingStatus = mapStatusToBooking(normalizedStatus);
@@ -60,27 +63,29 @@ async function processPaymentEvent(payload, { redisClient }) {
     throw new Error(`Unsupported payment status: ${payload.status}`);
   }
 
-  const updated = await bookingModel.updateStatus(bookingId, newBookingStatus);
+  const lockKey = defaultLockKeyForBooking(booking);
+  const lockService = new InventoryLockService(redisClient);
+  const updated = await bookingModel.transitionStatus(bookingId, newBookingStatus, {
+    releaseInventoryLock: async () => {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'P',location:'payment_processor.js:63',message:'processPaymentEvent expire start',data:{lockKey,redisIsOpen:redisClient?.isOpen,redisIsReady:redisClient?.isReady},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+      try {
+        await lockService.expire(lockKey);
+      } catch (error) {
+        // #region agent log
+        fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'P',location:'payment_processor.js:69',message:'processPaymentEvent expire error',data:{name:error?.name,message:error?.message},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+        throw error;
+      }
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'P',location:'payment_processor.js:73',message:'processPaymentEvent expire done',data:{lockKey},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+    }
+  });
   if (!updated) {
     throw new Error(`Failed to update booking ${bookingId}`);
   }
-
-  const lockKey = defaultLockKeyForBooking(booking);
-  const lockService = new InventoryLockService(redisClient);
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'P',location:'payment_processor.js:66',message:'processPaymentEvent expire start',data:{lockKey,redisIsOpen:redisClient?.isOpen,redisIsReady:redisClient?.isReady},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
-  try {
-    await lockService.expire(lockKey);
-  } catch (error) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'P',location:'payment_processor.js:69',message:'processPaymentEvent expire error',data:{name:error?.name,message:error?.message},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
-    throw error;
-  }
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'P',location:'payment_processor.js:73',message:'processPaymentEvent expire done',data:{lockKey},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
 
   await auditEventModel.create({
     event_type: 'PAYMENT_WEBHOOK',

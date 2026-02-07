@@ -212,9 +212,9 @@ test('E2E: lock -> payment fail -> release -> rebook succeeds', async () => {
     hold_duration_minutes: 10,
     lock_key: lockKey
   });
-  await bookingModel.updateStatus(bookingA.id, 'payment_pending');
+  await bookingModel.updateStatus(bookingA.id, 'hold');
   const bookingAState = await bookingModel.findById(bookingA.id);
-  assert.strictEqual(bookingAState.status, 'payment_pending');
+  assert.strictEqual(bookingAState.status, 'hold');
 
   let acquireB;
   try {
@@ -261,7 +261,7 @@ test('E2E: lock -> payment fail -> release -> rebook succeeds', async () => {
     hold_duration_minutes: 10,
     lock_key: lockKey
   });
-  await bookingModel.updateStatus(bookingB.id, 'payment_pending');
+  await bookingModel.updateStatus(bookingB.id, 'hold');
 
   let paymentSuccess;
   try {
