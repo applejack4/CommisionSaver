@@ -9,8 +9,14 @@ const { getDatabase } = require('../database');
 const { createClient } = require('redis');
 const { InventoryLockService } = require('../services/redis/InventoryLockService');
 const { getLockKeysForBooking, releaseLockKeys } = require('../services/inventoryLocking');
+const { rateLimit } = require('../services/security/rate_limiter');
+const { RetryableError } = require('../services/errors');
+const { buildBookingToken } = require('../services/security/booking_tokens');
+const metrics = require('../services/observability/metrics');
+const { createLogger } = require('../services/observability/logger');
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+const logger = createLogger({ source: 'booking_create' });
 
 /**
  * Get the first route from database (default route for bookings)
@@ -74,6 +80,21 @@ async function getLatestHoldBooking(bookingId = null) {
  */
 router.post('/create', async (req, res) => {
   try {
+    try {
+      rateLimit({
+        scope: 'booking_create',
+        identifier: req.ip,
+        limit: Number.parseInt(process.env.RATE_LIMIT_BOOKING || '30', 10),
+        windowMs: 60000
+      });
+    } catch (error) {
+      const status = error instanceof RetryableError ? 429 : 400;
+      return res.status(status).json({
+        success: false,
+        error: error.code || 'RATE_LIMITED'
+      });
+    }
+
     const { customer_phone, customer_name, route_id, journey_date, seat_count } = req.body;
 
     if (!customer_phone) {
@@ -121,6 +142,7 @@ router.post('/create', async (req, res) => {
       journey_date: journeyDate,
       seat_count: seat_count || 1 // Default seat count
     });
+    metrics.increment('booking_success', 1, { source: 'api' });
 
     console.log(`Booking created: ID ${booking.id} for customer ${customer_phone}`);
 
@@ -186,10 +208,20 @@ router.post('/create', async (req, res) => {
     res.status(201).json({
       success: true,
       booking: booking,
+      booking_token: buildBookingToken(booking.id),
       message: 'Booking created successfully'
     });
   } catch (error) {
     console.error('Error creating booking:', error);
+    metrics.increment('booking_failures', 1, { source: 'api' });
+    if (error instanceof RetryableError) {
+      logger.warn('booking_retryable_error', { error: error.message });
+      return res.status(503).json({
+        success: false,
+        error: error.code || 'RETRY_LATER',
+        details: error.message
+      });
+    }
     res.status(500).json({
       success: false,
       error: 'Internal server error while creating booking',

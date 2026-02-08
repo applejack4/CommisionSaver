@@ -16,6 +16,7 @@ const STATUS = {
   INVALID_ARGS: 9,
   INVALID_TTL: 10
 };
+const metrics = require('../observability/metrics');
 
 class InventoryLockError extends Error {
   constructor(code, status) {
@@ -104,7 +105,11 @@ class InventoryLockService {
   }
 
   async acquire(lockKey, sessionId, ttlSeconds) {
+    const startedAt = Date.now();
     const status = await this.execute('ACQUIRE', lockKey, sessionId, ttlSeconds);
+    metrics.recordLatency('redis_lock_wait_time', Date.now() - startedAt, {
+      lockKey: String(lockKey)
+    });
     if (status === STATUS.ACQUIRED || status === STATUS.ALREADY_OWNED) {
       return true;
     }

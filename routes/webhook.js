@@ -11,17 +11,22 @@ const { parseBookingRequest, getHelpMessage } = require('../services/messagePars
 const { getDatabase } = require('../database');
 const { createClient } = require('redis');
 const { InventoryLockService } = require('../services/redis/InventoryLockService');
-const {
-  buildSeatLockKey,
-  getLockKeysForBooking,
-  releaseLockKeys
-} = require('../services/inventoryLocking');
+const { getLockKeysForBooking, releaseLockKeys } = require('../services/inventoryLocking');
+const { acquireSeatLocks } = require('../services/inventory/seat_allocation_service');
 const { withIdempotency } = require('../services/idempotency/with_idempotency');
 const { RetryLaterError } = require('../services/idempotency/retry_later_error');
+const { verifyWhatsAppWebhook } = require('../services/security/webhook_security');
+const { rateLimit } = require('../services/security/rate_limiter');
+const { RetryableError, NonRetryableError } = require('../services/errors');
+const { getRedisClient } = require('../services/redis/redis_client');
+const { createLogger } = require('../services/observability/logger');
+const metrics = require('../services/observability/metrics');
 
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
 const HOLD_DURATION_MINUTES = parseInt(process.env.HOLD_DURATION_MINUTES || '10', 10);
 const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+const WHATSAPP_WEBHOOK_SECRET = process.env.WHATSAPP_WEBHOOK_SECRET;
+const logger = createLogger({ source: 'whatsapp_webhook' });
 
 /**
  * Normalize phone number for matching (remove +, spaces, etc.)
@@ -30,50 +35,6 @@ const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
  */
 function normalizePhoneNumber(phoneNumber) {
   return phoneNumber.replace(/[\s+\-()]/g, '');
-}
-
-async function acquireSeatLocks({
-  lockService,
-  tripId,
-  seatCount,
-  seatQuota,
-  sessionId,
-  ttlSeconds
-}) {
-  const seatNumbers = [];
-  const lockKeys = [];
-
-  for (let seatNumber = 1; seatNumber <= seatQuota && seatNumbers.length < seatCount; seatNumber += 1) {
-    const lockKey = buildSeatLockKey(tripId, seatNumber);
-    try {
-      const acquired = await lockService.acquire(lockKey, sessionId, ttlSeconds);
-      if (acquired) {
-        seatNumbers.push(seatNumber);
-        lockKeys.push(lockKey);
-      }
-    } catch (error) {
-      await releaseLockKeys(lockService, lockKeys, {
-        bookingId: null,
-        reason: 'acquire-failed'
-      });
-      throw error;
-    }
-  }
-
-  if (seatNumbers.length < seatCount) {
-    await releaseLockKeys(lockService, lockKeys, {
-      bookingId: null,
-      reason: 'acquire-insufficient'
-    });
-    return { acquired: false, seatNumbers: [], lockKeys: [] };
-  }
-
-  console.log('[inventory-locks] Acquired locks', {
-    tripId,
-    seatCount,
-    lockKeys
-  });
-  return { acquired: true, seatNumbers, lockKeys };
 }
 
 async function isTakeoverActiveForCustomer(phoneNumber) {
@@ -140,7 +101,37 @@ router.get('/whatsapp/webhook', (req, res) => {
  */
 router.post('/whatsapp/webhook', async (req, res) => {
   try {
-    // Always return 200 to WhatsApp to avoid retries
+    try {
+      rateLimit({
+        scope: 'whatsapp_webhook',
+        identifier: req.ip,
+        limit: Number.parseInt(process.env.RATE_LIMIT_WEBHOOKS || '60', 10),
+        windowMs: 60000
+      });
+    } catch (error) {
+      const status = error instanceof RetryableError ? 429 : 400;
+      res.status(status).json({
+        success: false,
+        error: error.code || 'RATE_LIMITED'
+      });
+      return;
+    }
+
+    if (WHATSAPP_WEBHOOK_SECRET) {
+      const rawBody = req.rawBody || JSON.stringify(req.body || {});
+      const { client, close } = await getRedisClient();
+      try {
+        await verifyWhatsAppWebhook({
+          rawBody,
+          headers: req.headers,
+          secret: WHATSAPP_WEBHOOK_SECRET,
+          redisClient: client
+        });
+      } finally {
+        await close();
+      }
+    }
+
     console.log("🔥 WEBHOOK HIT");
     console.log("Webhook payload:", JSON.stringify(req.body, null, 2));
     res.status(200).send('OK');
@@ -171,6 +162,7 @@ router.post('/whatsapp/webhook', async (req, res) => {
       const idempotencyKey = `${wamid}:${intent}`;
 
       console.log(`Received ${messageType} message from ${normalizedFrom} (original: ${from})`);
+      metrics.increment('booking_attempts', 1, { source: 'whatsapp' });
 
       const handleMessageOnce = async () => {
         // Identify sender: operator or customer
@@ -230,6 +222,26 @@ router.post('/whatsapp/webhook', async (req, res) => {
       console.log('Change value:', JSON.stringify(change.value, null, 2));
     }
   } catch (error) {
+    if (error instanceof RetryableError) {
+      logger.warn('whatsapp_webhook_retryable_error', {
+        error: error.message,
+        code: error.code
+      });
+      if (!res.headersSent) {
+        res.status(503).json({ success: false, error: error.code || 'RETRY_LATER' });
+      }
+      return;
+    }
+    if (error instanceof NonRetryableError) {
+      logger.warn('whatsapp_webhook_rejected', {
+        error: error.message,
+        code: error.code
+      });
+      if (!res.headersSent) {
+        res.status(401).json({ success: false, error: error.code || 'REJECTED' });
+      }
+      return;
+    }
     console.error('Error processing webhook:', error);
     console.error('Error stack:', error.stack);
     console.error('Error details:', {
@@ -373,8 +385,8 @@ async function handleCustomerMessage(phoneNumber, messageText) {
     const sessionId = `sess_${phoneNumber}_${Date.now()}`;
 
     // Acquire Redis locks before DB hold to enforce "no lock -> no hold".
-    const redisClient = createClient({ url: REDIS_URL });
-    await redisClient.connect();
+    const redisHandle = await getRedisClient();
+    const redisClient = redisHandle.client;
     const lockService = new InventoryLockService(redisClient);
 
     let lockPayload = null;
@@ -382,9 +394,8 @@ async function handleCustomerMessage(phoneNumber, messageText) {
     try {
       lockPayload = await acquireSeatLocks({
         lockService,
-        tripId: trip.id,
+        trip,
         seatCount: bookingRequest.seats,
-        seatQuota: trip.whatsapp_seat_quota,
         sessionId,
         ttlSeconds
       });
@@ -417,14 +428,11 @@ async function handleCustomerMessage(phoneNumber, messageText) {
         throw error;
       }
     } finally {
-      try {
-        await redisClient.quit();
-      } catch (error) {
-        redisClient.disconnect();
-      }
+      await redisHandle.close();
     }
 
     console.log(`Hold created: Booking ID ${booking.id} for ${bookingRequest.seats} seats`);
+    metrics.increment('booking_success', 1, { source: 'whatsapp' });
 
     // Get operator phone
     const operatorPhone = process.env.OPERATOR_PHONE || '1234567890';
@@ -478,6 +486,7 @@ async function handleCustomerMessage(phoneNumber, messageText) {
     }
   } catch (error) {
     console.error('Error creating booking hold:', error);
+    metrics.increment('booking_failures', 1, { source: 'whatsapp' });
     try {
       await whatsappService.sendMessage(
         phoneNumber,

@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const auditRepo = require('./audit_repo');
 const { RetryLaterError } = require('./retry_later_error');
+const metrics = require('../observability/metrics');
 
 function stableStringify(value) {
   if (value === null || value === undefined) {
@@ -45,6 +46,16 @@ async function withIdempotency({
   });
 
   if (!insertResult.inserted) {
+    metrics.increment('idempotency_hits', 1, {
+      source,
+      eventType,
+      status: insertResult.status || 'unknown'
+    });
+    if (source === 'payment') {
+      metrics.increment('payment_webhook_duplicates', 1, {
+        eventType
+      });
+    }
     if (insertResult.status === 'completed') {
       return insertResult.response_snapshot;
     }

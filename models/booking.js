@@ -392,6 +392,29 @@ async function expireHold(id, options = {}) {
   return transitionStatus(id, BOOKING_STATUSES.EXPIRED, options);
 }
 
+async function setCancellationDetails(id, details = {}) {
+  const db = await getDatabase();
+  const { cancelled_at = null, cancelled_by = null, cancellation_reason = null } = details;
+
+  return new Promise((resolve, reject) => {
+    db.run(
+      `UPDATE bookings
+       SET cancelled_at = COALESCE(?, cancelled_at),
+           cancelled_by = COALESCE(?, cancelled_by),
+           cancellation_reason = COALESCE(?, cancellation_reason)
+       WHERE id = ?`,
+      [cancelled_at, cancelled_by, cancellation_reason, id],
+      function (err) {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(this.changes || 0);
+      }
+    );
+  });
+}
+
 /**
  * Find bookings by trip ID
  * @param {number} tripId - Trip ID
@@ -498,5 +521,6 @@ module.exports = {
   findBookingsNeedingReminders,
   hasReminder,
   getLockKeys,
-  getSeatNumbers
+  getSeatNumbers,
+  setCancellationDetails
 };

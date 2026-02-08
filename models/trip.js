@@ -1,4 +1,5 @@
 const { getDatabase } = require('../database');
+const inventoryOverrideModel = require('./inventoryOverride');
 
 /**
  * Create a new trip
@@ -87,6 +88,34 @@ async function findByRouteDateTime(route_id, journey_date, departure_time) {
           return;
         }
         resolve(row || null);
+      }
+    );
+  });
+}
+
+/**
+ * Find trips by route and date
+ * @param {number} route_id - Route ID
+ * @param {string} journey_date - Journey date (YYYY-MM-DD)
+ * @returns {Promise<Array>} Array of trip objects
+ */
+async function findByRouteDate(route_id, journey_date) {
+  const db = await getDatabase();
+
+  return new Promise((resolve, reject) => {
+    db.all(
+      `SELECT t.*, r.source, r.destination, r.price, r.operator_id
+       FROM trips t
+       JOIN routes r ON t.route_id = r.id
+       WHERE t.route_id = ? AND t.journey_date = ?
+       ORDER BY t.departure_time ASC`,
+      [route_id, journey_date],
+      (err, rows) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(rows || []);
       }
     );
   });
@@ -194,16 +223,24 @@ async function getAvailableSeats(tripId) {
                FROM bookings
                WHERE trip_id = ? AND status = 'hold' AND hold_expires_at > datetime('now')`,
               [tripId],
-              (err, held) => {
+              async (err, held) => {
                 if (err) {
                   reject(err);
                   return;
                 }
-                
-                const available = trip.whatsapp_seat_quota - 
-                                 (confirmed.confirmed_seats || 0) - 
-                                 (held.held_seats || 0);
-                resolve(Math.max(0, available));
+                try {
+                  const blockedCount = await inventoryOverrideModel.countBlockedSeats(
+                    trip.route_id,
+                    trip.journey_date
+                  );
+                  const available = trip.whatsapp_seat_quota -
+                                   (confirmed.confirmed_seats || 0) -
+                                   (held.held_seats || 0) -
+                                   blockedCount;
+                  resolve(Math.max(0, available));
+                } catch (error) {
+                  reject(error);
+                }
               }
             );
           }
@@ -225,6 +262,8 @@ async function getTripStats(tripId) {
     db.get(
       `SELECT 
         t.whatsapp_seat_quota,
+        t.route_id,
+        t.journey_date,
         COALESCE(SUM(CASE WHEN b.status = 'confirmed' THEN b.seat_count ELSE 0 END), 0) as confirmed_seats,
         COALESCE(SUM(CASE WHEN b.status = 'hold' AND b.hold_expires_at > datetime('now') THEN b.seat_count ELSE 0 END), 0) as held_seats
        FROM trips t
@@ -232,7 +271,7 @@ async function getTripStats(tripId) {
        WHERE t.id = ?
        GROUP BY t.id, t.whatsapp_seat_quota`,
       [tripId],
-      (err, row) => {
+      async (err, row) => {
         if (err) {
           reject(err);
           return;
@@ -242,15 +281,24 @@ async function getTripStats(tripId) {
           resolve(null);
           return;
         }
-        
-        const available = row.whatsapp_seat_quota - row.confirmed_seats - row.held_seats;
-        
-        resolve({
-          quota: row.whatsapp_seat_quota,
-          available: Math.max(0, available),
-          held: row.held_seats,
-          confirmed: row.confirmed_seats
-        });
+
+        try {
+          const blockedCount = await inventoryOverrideModel.countBlockedSeats(
+            row.route_id,
+            row.journey_date
+          );
+          const available =
+            row.whatsapp_seat_quota - row.confirmed_seats - row.held_seats - blockedCount;
+          
+          resolve({
+            quota: row.whatsapp_seat_quota,
+            available: Math.max(0, available),
+            held: row.held_seats,
+            confirmed: row.confirmed_seats
+          });
+        } catch (error) {
+          reject(error);
+        }
       }
     );
   });
@@ -260,6 +308,7 @@ module.exports = {
   create,
   findById,
   findByRouteDateTime,
+  findByRouteDate,
   findByDateRange,
   updateSeatQuota,
   getAvailableSeats,

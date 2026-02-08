@@ -1,4 +1,5 @@
 const sqlite3 = require('sqlite3').verbose();
+const { RetryableError } = require('./services/errors');
 const path = require('path');
 
 const DB_PATH = path.join(__dirname, 'database.sqlite');
@@ -409,9 +410,89 @@ function migrateAuditEventsSchema(db) {
   });
 }
 
+function migrateCancellationSchema(db) {
+  return new Promise((resolve, reject) => {
+    db.serialize(() => {
+      db.run(
+        `CREATE TABLE IF NOT EXISTS cancellations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          booking_id INTEGER NOT NULL UNIQUE,
+          cancelled_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          cancelled_by TEXT NOT NULL,
+          cancellation_reason TEXT,
+          actor_id TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE CASCADE
+        )`,
+        (err) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          db.run(
+            `CREATE INDEX IF NOT EXISTS idx_cancellations_booking
+             ON cancellations (booking_id)`,
+            (indexErr) => {
+              if (indexErr) {
+                reject(indexErr);
+                return;
+              }
+              resolve();
+            }
+          );
+        }
+      );
+    });
+  });
+}
+
+function migrateInventoryOverridesSchema(db) {
+  return new Promise((resolve, reject) => {
+    db.serialize(() => {
+      db.run(
+        `CREATE TABLE IF NOT EXISTS inventory_overrides (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          route_id INTEGER NOT NULL,
+          trip_date DATE NOT NULL,
+          seat_number INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'blocked',
+          reason TEXT,
+          actor_type TEXT NOT NULL,
+          actor_id TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME,
+          unblocked_at DATETIME,
+          unblocked_by TEXT,
+          FOREIGN KEY (route_id) REFERENCES routes(id) ON DELETE CASCADE,
+          UNIQUE(route_id, trip_date, seat_number)
+        )`,
+        (err) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          db.run(
+            `CREATE INDEX IF NOT EXISTS idx_inventory_overrides_route_date
+             ON inventory_overrides (route_id, trip_date, status)`,
+            (indexErr) => {
+              if (indexErr) {
+                reject(indexErr);
+                return;
+              }
+              resolve();
+            }
+          );
+        }
+      );
+    });
+  });
+}
+
 function runMigrations(db) {
   return new Promise((resolve, reject) => {
     migrateAuditEventsSchema(db)
+      .then(() => migrateCancellationSchema(db))
+      .then(() => migrateInventoryOverridesSchema(db))
       .then(() => {
         // First, check the current schema
         db.all("PRAGMA table_info(bookings)", (err, rows) => {
@@ -435,6 +516,9 @@ function runMigrations(db) {
           const hasLockKey = columnNames.includes('lock_key');
           const hasLockKeys = columnNames.includes('lock_keys');
           const hasSeatNumbers = columnNames.includes('seat_numbers');
+          const hasCancelledAt = columnNames.includes('cancelled_at');
+          const hasCancelledBy = columnNames.includes('cancelled_by');
+          const hasCancellationReason = columnNames.includes('cancellation_reason');
 
           const finalize = () => {
             db.serialize(() => {
@@ -555,6 +639,45 @@ function runMigrations(db) {
                 }
               });
             }
+
+            if (!hasCancelledAt) {
+              db.run(`
+                ALTER TABLE bookings
+                ADD COLUMN cancelled_at DATETIME
+              `, (err) => {
+                if (err) {
+                  console.error('Error adding cancelled_at column:', err.message);
+                } else {
+                  console.log('Added cancelled_at column to bookings table');
+                }
+              });
+            }
+
+            if (!hasCancelledBy) {
+              db.run(`
+                ALTER TABLE bookings
+                ADD COLUMN cancelled_by TEXT
+              `, (err) => {
+                if (err) {
+                  console.error('Error adding cancelled_by column:', err.message);
+                } else {
+                  console.log('Added cancelled_by column to bookings table');
+                }
+              });
+            }
+
+            if (!hasCancellationReason) {
+              db.run(`
+                ALTER TABLE bookings
+                ADD COLUMN cancellation_reason TEXT
+              `, (err) => {
+                if (err) {
+                  console.error('Error adding cancellation_reason column:', err.message);
+                } else {
+                  console.log('Added cancellation_reason column to bookings table');
+                }
+              });
+            }
           });
         });
       })
@@ -664,6 +787,11 @@ function seedDefaultData(db) {
 let dbInstance = null;
 
 async function getDatabase() {
+  if (process.env.DB_FORCE_UNAVAILABLE === '1') {
+    throw new RetryableError('Database unavailable', {
+      code: 'DB_UNAVAILABLE'
+    });
+  }
   if (!dbInstance) {
     dbInstance = await initializeDatabase();
   }

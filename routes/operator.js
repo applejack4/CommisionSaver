@@ -7,8 +7,12 @@ const auditEventModel = require('../models/auditEvent');
 const { buildSeatLockKey, getLockKeysForBooking } = require('../services/inventoryLocking');
 const { withIdempotency } = require('../services/idempotency/with_idempotency');
 const { RetryLaterError } = require('../services/idempotency/retry_later_error');
+const { rateLimit } = require('../services/security/rate_limiter');
+const { RetryableError } = require('../services/errors');
+const { createLogger } = require('../services/observability/logger');
 
 const DEFAULT_LIMIT = 50;
+const logger = createLogger({ source: 'operator_api' });
 
 function requireIdempotencyKey(req, res) {
   const key = req.get('X-Idempotency-Key');
@@ -20,6 +24,42 @@ function requireIdempotencyKey(req, res) {
     return null;
   }
   return key;
+}
+
+function requireOperatorId(req, res) {
+  const operatorId = req.get('x-operator-id') || req.query.operator_id || req.body?.operator_id;
+  if (!operatorId) {
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'run1',hypothesisId:'D',location:'operator.js:29',message:'operator_id missing',data:{path:req.originalUrl,method:req.method},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    res.status(400).json({
+      success: false,
+      error: 'OPERATOR_ID_REQUIRED'
+    });
+    return null;
+  }
+  return operatorId;
+}
+
+async function hasOperatorAccess(bookingId, operatorId) {
+  const db = await getDatabase();
+  return new Promise((resolve, reject) => {
+    db.get(
+      `SELECT r.operator_id
+       FROM bookings b
+       JOIN trips t ON b.trip_id = t.id
+       JOIN routes r ON t.route_id = r.id
+       WHERE b.id = ?`,
+      [bookingId],
+      (err, row) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(row && String(row.operator_id) === String(operatorId));
+      }
+    );
+  });
 }
 
 function toIsoTimestamp(value) {
@@ -222,19 +262,20 @@ function buildMessagesForBooking(booking) {
   ];
 }
 
-async function getRecentBookings(limit) {
+async function getRecentBookings(operatorId, limit) {
   const db = await getDatabase();
   const safeLimit = Number.isFinite(limit) ? limit : DEFAULT_LIMIT;
 
   return new Promise((resolve, reject) => {
     db.all(
-      `SELECT b.*, t.journey_date, t.departure_time, r.source, r.destination, r.price
+      `SELECT b.*, t.journey_date, t.departure_time, r.source, r.destination, r.price, r.operator_id
        FROM bookings b
        JOIN trips t ON b.trip_id = t.id
        JOIN routes r ON t.route_id = r.id
+       WHERE r.operator_id = ?
        ORDER BY b.created_at DESC
        LIMIT ?`,
-      [safeLimit],
+      [operatorId, safeLimit],
       (err, rows) => {
         if (err) {
           reject(err);
@@ -366,8 +407,24 @@ function dedupeSessionsById(sessions) {
  */
 router.get('/sessions', async (req, res) => {
   try {
+    const operatorId = requireOperatorId(req, res);
+    if (!operatorId) return;
+    try {
+      rateLimit({
+        scope: 'operator_sessions',
+        identifier: req.ip,
+        limit: Number.parseInt(process.env.RATE_LIMIT_OPERATOR || '120', 10),
+        windowMs: 60000
+      });
+    } catch (error) {
+      const status = error instanceof RetryableError ? 429 : 400;
+      return res.status(status).json({
+        success: false,
+        error: error.code || 'RATE_LIMITED'
+      });
+    }
     const limit = parseInt(req.query.limit, 10) || DEFAULT_LIMIT;
-    const bookings = await getRecentBookings(limit);
+    const bookings = await getRecentBookings(operatorId, limit);
     const sessions = bookings.map(buildSessionFromBooking);
 
     const sourceSessions = sessions.length ? sessions : [buildMockSession()];
@@ -386,6 +443,13 @@ router.get('/sessions', async (req, res) => {
       next_cursor: null
     });
   } catch (error) {
+    if (error instanceof RetryableError) {
+      logger.warn('operator_sessions_retryable_error', { error: error.message });
+      return res.status(503).json({
+        success: false,
+        error: error.code || 'RETRY_LATER'
+      });
+    }
     console.error('Error fetching operator sessions:', error);
     res.status(500).json({
       success: false,
@@ -400,8 +464,16 @@ router.get('/sessions', async (req, res) => {
  */
 router.get('/sessions/:session_id', async (req, res) => {
   try {
+    const operatorId = requireOperatorId(req, res);
+    if (!operatorId) return;
     const sessionId = req.params.session_id;
     const bookingId = parseBookingIdFromSessionId(sessionId);
+    if (bookingId && !(await hasOperatorAccess(bookingId, operatorId))) {
+      return res.status(403).json({
+        success: false,
+        error: 'OPERATOR_FORBIDDEN'
+      });
+    }
     const booking = bookingId ? await bookingModel.findById(bookingId) : null;
 
     const baseSession = booking ? buildSessionFromBooking(booking) : buildMockSession();
@@ -436,6 +508,13 @@ router.get('/sessions/:session_id', async (req, res) => {
       payment: paymentSummary
     });
   } catch (error) {
+    if (error instanceof RetryableError) {
+      logger.warn('operator_session_retryable_error', { error: error.message });
+      return res.status(503).json({
+        success: false,
+        error: error.code || 'RETRY_LATER'
+      });
+    }
     console.error('Error fetching session detail:', error);
     res.status(500).json({
       success: false,
@@ -450,8 +529,16 @@ router.get('/sessions/:session_id', async (req, res) => {
  */
 router.get('/sessions/:session_id/messages', async (req, res) => {
   try {
+    const operatorId = requireOperatorId(req, res);
+    if (!operatorId) return;
     const sessionId = req.params.session_id;
     const bookingId = parseBookingIdFromSessionId(sessionId);
+    if (bookingId && !(await hasOperatorAccess(bookingId, operatorId))) {
+      return res.status(403).json({
+        success: false,
+        error: 'OPERATOR_FORBIDDEN'
+      });
+    }
     const booking = bookingId ? await bookingModel.findById(bookingId) : null;
     const messages = buildMessagesForBooking(booking);
 
@@ -461,6 +548,13 @@ router.get('/sessions/:session_id/messages', async (req, res) => {
       next_cursor: null
     });
   } catch (error) {
+    if (error instanceof RetryableError) {
+      logger.warn('operator_messages_retryable_error', { error: error.message });
+      return res.status(503).json({
+        success: false,
+        error: error.code || 'RETRY_LATER'
+      });
+    }
     console.error('Error fetching session messages:', error);
     res.status(500).json({
       success: false,
@@ -475,6 +569,8 @@ router.get('/sessions/:session_id/messages', async (req, res) => {
  */
 router.get('/bookings/:booking_id', async (req, res) => {
   try {
+    const operatorId = requireOperatorId(req, res);
+    if (!operatorId) return;
     const bookingId = parseInt(req.params.booking_id, 10);
     const booking = Number.isNaN(bookingId)
       ? null
@@ -486,6 +582,13 @@ router.get('/bookings/:booking_id', async (req, res) => {
         booking: buildMockBooking(req.params.booking_id)
       });
       return;
+    }
+
+    if (!(await hasOperatorAccess(bookingId, operatorId))) {
+      return res.status(403).json({
+        success: false,
+        error: 'OPERATOR_FORBIDDEN'
+      });
     }
 
     res.status(200).json({
@@ -521,6 +624,13 @@ router.get('/bookings/:booking_id', async (req, res) => {
       }
     });
   } catch (error) {
+    if (error instanceof RetryableError) {
+      logger.warn('operator_booking_retryable_error', { error: error.message });
+      return res.status(503).json({
+        success: false,
+        error: error.code || 'RETRY_LATER'
+      });
+    }
     console.error('Error fetching operator booking:', error);
     res.status(500).json({
       success: false,
