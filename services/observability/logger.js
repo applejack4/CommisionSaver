@@ -26,9 +26,6 @@ function log(level, message, fields = {}) {
     return;
   }
   if (level === LEVELS.warn) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'run1',hypothesisId:'W',location:'logger.js:27',message:'logger warn emitted',data:{message,fieldKeys:Object.keys(fields || {})},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     console.warn(line);
     return;
   }

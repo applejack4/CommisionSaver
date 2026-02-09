@@ -23,44 +23,16 @@ function normalizePhoneNumber(phoneNumber) {
  * @returns {Promise<Object>} API response
  */
 async function sendMessage(phoneNumber, message) {
-  debugger;
   console.log(`[whatsapp.sendMessage] Called with phoneNumber: ${phoneNumber}, message length: ${message?.length || 0}`);
   
-  // #region agent log
-  try {
-    if (typeof fetch !== 'undefined') {
-      fetch('http://127.0.0.1:7242/ingest/2e5d7a8b-2c31-4c53-bec6-7fab2ceda2df',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'whatsapp.js:25',message:'sendMessage called',data:{phoneNumber:phoneNumber,messageLength:message?message.length:0,hasAccessToken:!!ACCESS_TOKEN,hasPhoneNumberId:!!PHONE_NUMBER_ID},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-    }
-  } catch (fetchError) {
-    // Ignore fetch errors
-  }
-  // #endregion
   
   if (!ACCESS_TOKEN) {
     console.error('[whatsapp.sendMessage] ACCESS_TOKEN is missing');
-    // #region agent log
-    try {
-      if (typeof fetch !== 'undefined') {
-        fetch('http://127.0.0.1:7242/ingest/2e5d7a8b-2c31-4c53-bec6-7fab2ceda2df',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'whatsapp.js:28',message:'ACCESS_TOKEN missing',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-      }
-    } catch (fetchError) {
-      // Ignore fetch errors
-    }
-    // #endregion
     throw new Error('ACCESS_TOKEN environment variable is not set');
   }
 
   if (!PHONE_NUMBER_ID) {
     console.error('[whatsapp.sendMessage] PHONE_NUMBER_ID is missing');
-    // #region agent log
-    try {
-      if (typeof fetch !== 'undefined') {
-        fetch('http://127.0.0.1:7242/ingest/2e5d7a8b-2c31-4c53-bec6-7fab2ceda2df',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'whatsapp.js:32',message:'PHONE_NUMBER_ID missing',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-      }
-    } catch (fetchError) {
-      // Ignore fetch errors
-    }
-    // #endregion
     throw new Error('PHONE_NUMBER_ID environment variable is not set');
   }
 
@@ -87,15 +59,6 @@ async function sendMessage(phoneNumber, message) {
   console.log(`[whatsapp.sendMessage] Sending to ${BASE_URL}`);
   console.log(`[whatsapp.sendMessage] Payload:`, JSON.stringify({ ...payload, text: { body: message.substring(0, 50) + '...' } }, null, 2));
 
-  // #region agent log
-  try {
-    if (typeof fetch !== 'undefined') {
-      fetch('http://127.0.0.1:7242/ingest/2e5d7a8b-2c31-4c53-bec6-7fab2ceda2df',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'whatsapp.js:54',message:'Sending WhatsApp API request',data:{baseUrl:BASE_URL,normalizedPhone:normalizedPhone,payloadKeys:Object.keys(payload)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
-    }
-  } catch (fetchError) {
-    // Ignore fetch errors
-  }
-  // #endregion
 
   try {
     const response = await axios.post(BASE_URL, payload, {
@@ -108,27 +71,9 @@ async function sendMessage(phoneNumber, message) {
     console.log(`[whatsapp.sendMessage] Success! Response status: ${response.status}`);
     console.log(`[whatsapp.sendMessage] Response data:`, JSON.stringify(response.data, null, 2));
 
-    // #region agent log
-    try {
-      if (typeof fetch !== 'undefined') {
-        fetch('http://127.0.0.1:7242/ingest/2e5d7a8b-2c31-4c53-bec6-7fab2ceda2df',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'whatsapp.js:62',message:'WhatsApp API success',data:{status:response.status,responseData:response.data},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
-      }
-    } catch (fetchError) {
-      // Ignore fetch errors
-    }
-    // #endregion
 
     return response.data;
   } catch (error) {
-    // #region agent log
-    try {
-      if (typeof fetch !== 'undefined') {
-        fetch('http://127.0.0.1:7242/ingest/2e5d7a8b-2c31-4c53-bec6-7fab2ceda2df',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'whatsapp.js:66',message:'WhatsApp API error',data:{hasResponse:!!error.response,status:error.response?error.response.status:null,errorData:error.response?error.response.data:null,errorMessage:error.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
-      }
-    } catch (fetchError) {
-      // Ignore fetch errors
-    }
-    // #endregion
     
     // Log error details for debugging
     console.error(`[whatsapp.sendMessage] Error sending message to ${normalizedPhone}:`);

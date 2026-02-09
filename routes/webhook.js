@@ -651,15 +651,6 @@ async function handleOperatorMessage(phoneNumber, message, messageType) {
     const messageText = message.text?.body || '';
     console.log(`[handleOperatorMessage] Operator ${phoneNumber} sent text: "${messageText}"`);
     
-    // #region agent log
-    try {
-      if (typeof fetch !== 'undefined') {
-        fetch('http://127.0.0.1:7242/ingest/2e5d7a8b-2c31-4c53-bec6-7fab2ceda2df',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'webhook.js:430',message:'Attempting to send acknowledgment to operator',data:{phoneNumber:phoneNumber,messageText:messageText.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
-      }
-    } catch (fetchError) {
-      // Ignore fetch errors
-    }
-    // #endregion
     
     try {
       console.log(`[handleOperatorMessage] Sending acknowledgment to operator ${phoneNumber}`);
@@ -667,26 +658,8 @@ async function handleOperatorMessage(phoneNumber, message, messageType) {
         phoneNumber,
         '✅ Message received. Your message has been acknowledged.'
       );
-      // #region agent log
-      try {
-        if (typeof fetch !== 'undefined') {
-          fetch('http://127.0.0.1:7242/ingest/2e5d7a8b-2c31-4c53-bec6-7fab2ceda2df',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'webhook.js:437',message:'Acknowledgment sent successfully',data:{phoneNumber:phoneNumber,result:result},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
-        }
-      } catch (fetchError) {
-        // Ignore fetch errors
-      }
-      // #endregion
       console.log(`[handleOperatorMessage] Acknowledgment sent successfully to operator ${phoneNumber}`, result);
     } catch (error) {
-      // #region agent log
-      try {
-        if (typeof fetch !== 'undefined') {
-          fetch('http://127.0.0.1:7242/ingest/2e5d7a8b-2c31-4c53-bec6-7fab2ceda2df',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'webhook.js:442',message:'Failed to send acknowledgment',data:{phoneNumber:phoneNumber,errorMessage:error.message,errorStack:error.stack?error.stack.substring(0,300):null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
-        }
-      } catch (fetchError) {
-        // Ignore fetch errors
-      }
-      // #endregion
       console.error(`[handleOperatorMessage] Failed to send acknowledgment to operator ${phoneNumber}:`, error.message);
       console.error('Error stack:', error.stack);
       throw error; // Re-throw to be caught by outer handler

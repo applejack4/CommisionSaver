@@ -65,6 +65,10 @@ async function withIdempotency({
     throw new RetryLaterError('Request is not ready to be retried');
   }
 
+  if (insertResult.takenOver) {
+    metrics.increment('idempotency_takeovers', 1, { source, eventType });
+  }
+
   try {
     const response = await handler();
     await auditRepo.markCompleted(insertResult.id, response);

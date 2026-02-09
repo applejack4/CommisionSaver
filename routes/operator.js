@@ -29,9 +29,6 @@ function requireIdempotencyKey(req, res) {
 function requireOperatorId(req, res) {
   const operatorId = req.get('x-operator-id') || req.query.operator_id || req.body?.operator_id;
   if (!operatorId) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'run1',hypothesisId:'D',location:'operator.js:29',message:'operator_id missing',data:{path:req.originalUrl,method:req.method},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     res.status(400).json({
       success: false,
       error: 'OPERATOR_ID_REQUIRED'

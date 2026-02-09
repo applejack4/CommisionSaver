@@ -20,7 +20,7 @@ const inventoryRoutes = require('./routes/inventory');
 const paymentWebhookHandler = require(
   './services/payment/payment_webhook_handler'
 );
-const { withContext, buildRequestContext } = require('./services/observability/request_context');
+const { withContext, buildRequestContext, buildRequestId } = require('./services/observability/request_context');
 const { createLogger } = require('./services/observability/logger');
 const metrics = require('./services/observability/metrics');
 const { rateLimit } = require('./services/security/rate_limiter');
@@ -28,7 +28,6 @@ const { RetryableError } = require('./services/errors');
 
 const { sendReminders } = require('./services/reminder');
 const { expireHolds } = require('./services/holdExpiration');
-const { buildRequestId, withContext } = require('./services/observability/request_context');
 
 const app = express();
 const logger = createLogger({ source: 'http' });

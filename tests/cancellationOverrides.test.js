@@ -34,13 +34,7 @@ async function ensureClientReady() {
   if (!redisClient.isOpen) {
     try {
       await redisClient.connect();
-      // #region agent log
-      fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'pre-fix',hypothesisId:'E',location:'cancellationOverrides.test.js:37',message:'redisClient connected',data:{isOpen:redisClient.isOpen,isReady:redisClient.isReady},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
     } catch (error) {
-      // #region agent log
-      fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'pre-fix',hypothesisId:'F',location:'cancellationOverrides.test.js:41',message:'redisClient connect failed',data:{name:error?.name,message:error?.message},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       throw error;
     }
   }
@@ -157,9 +151,6 @@ async function createConfirmedBooking(trip, seatNumbers) {
 
 before(async () => {
   const parsed = parseRedisUrl();
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'pre-fix',hypothesisId:'G',location:'cancellationOverrides.test.js:109',message:'before parseRedisUrl',data:{hasRedisUrl:Boolean(REDIS_URL),host:parsed?.host||null,port:parsed?.port||null,hasUsername:Boolean(parsed?.username),hasPassword:Boolean(parsed?.password)},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   redisAuth = parsed && parsed.password
     ? { username: parsed.username || null, password: parsed.password }
     : null;
@@ -183,13 +174,7 @@ beforeEach(async () => {
   await ensureClientReady();
   try {
     await redisClient.flushDb();
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'pre-fix',hypothesisId:'H',location:'cancellationOverrides.test.js:144',message:'flushDb ok',data:{},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
   } catch (error) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'pre-fix',hypothesisId:'H',location:'cancellationOverrides.test.js:148',message:'flushDb failed',data:{name:error?.name,message:error?.message},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     throw error;
   }
   await resetDb();

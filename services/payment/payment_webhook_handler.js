@@ -39,9 +39,6 @@ function getHeader(req, name) {
 
 const paymentWebhookHandler = async (req, res) => {
   try {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'run2',hypothesisId:'E',location:'payment_webhook_handler.js:40',message:'payment webhook entry',data:{hasBody:Boolean(req?.body),hasHeaders:Boolean(req?.headers)},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     try {
       rateLimit({
         scope: 'payment_webhook',
@@ -85,9 +82,6 @@ const paymentWebhookHandler = async (req, res) => {
       });
     }
 
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'run2',hypothesisId:'E',location:'payment_webhook_handler.js:83',message:'payment webhook payload parsed',data:{gatewayEventId:payload?.gateway_event_id,status:payload?.status},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
 
     const verification = verifyWebhookSignature({
       rawBody,
@@ -102,29 +96,17 @@ const paymentWebhookHandler = async (req, res) => {
       });
     }
 
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'run2',hypothesisId:'E',location:'payment_webhook_handler.js:98',message:'payment webhook verifying nonce',data:{hasNonce:Boolean(getHeader(req,'x-nonce'))},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
 
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'run1',hypothesisId:'A',location:'payment_webhook_handler.js:107',message:'payment webhook before getRedisClient',data:{forceRedisUnavailable:process.env.REDIS_FORCE_UNAVAILABLE === '1'},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     const redisHandle = await getRedisClient();
     const redisClient = redisHandle.client;
     try {
       const nonceHeader = getHeader(req, 'x-nonce');
-      // #region agent log
-      fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'run1',hypothesisId:'A',location:'payment_webhook_handler.js:112',message:'payment webhook nonce header',data:{hasNonce:Boolean(nonceHeader),nonceLength:nonceHeader?String(nonceHeader).length:0},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       await verifyNonce({
         nonce: getHeader(req, 'x-nonce'),
         scope: 'payment',
         ttlSeconds: 600,
         redisClient
       });
-      // #region agent log
-      fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'run1',hypothesisId:'A',location:'payment_webhook_handler.js:118',message:'payment webhook nonce verified',data:{gatewayEventId:payload?.gateway_event_id},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
 
       // IMPORTANT: Webhooks must respond quickly.
       // Heavy processing must move to async jobs later.
@@ -167,9 +149,6 @@ const paymentWebhookHandler = async (req, res) => {
       });
     }
     if (error instanceof RetryableError) {
-      // #region agent log
-      fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'run2',hypothesisId:'F',location:'payment_webhook_handler.js:147',message:'payment webhook retryable',data:{code:error.code,message:error.message},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
       logger.warn('payment_webhook_retryable_error', {
         error: error.message,
         code: error.code

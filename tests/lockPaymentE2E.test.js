@@ -28,9 +28,6 @@ function parseRedisUrl() {
 }
 
 async function ensureClientReady() {
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'A',location:'lockPaymentE2E.test.js:30',message:'ensureClientReady start',data:{hasClient:Boolean(client),isOpen:client?.isOpen,isReady:client?.isReady,hasRedisAuth:Boolean(redisAuth)},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   if (!client) {
     throw new Error('Redis client not initialized in before()');
   }
@@ -45,16 +42,10 @@ async function ensureClientReady() {
       })
     ]);
   }
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'A',location:'lockPaymentE2E.test.js:44',message:'ensureClientReady ready',data:{isOpen:client.isOpen,isReady:client.isReady,hasRedisAuth:Boolean(redisAuth)},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   if (redisAuth) {
     const authCommand = redisAuth.username
       ? ['AUTH', redisAuth.username, redisAuth.password]
       : ['AUTH', redisAuth.password];
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'A',location:'lockPaymentE2E.test.js:52',message:'ensureClientReady auth',data:{hasUsername:Boolean(redisAuth.username),hasPassword:Boolean(redisAuth.password)},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     await client.sendCommand(authCommand);
   }
   let pingResult = null;
@@ -64,13 +55,7 @@ async function ensureClientReady() {
   } catch (error) {
     pingError = { name: error?.name, message: error?.message };
   }
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'A',location:'lockPaymentE2E.test.js:60',message:'ensureClientReady ping',data:{pingResult,pingError},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   lockService = new InventoryLockService(client);
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'A',location:'lockPaymentE2E.test.js:69',message:'ensureClientReady done',data:{isOpen:client.isOpen,isReady:client.isReady,hasRedisAuth:Boolean(redisAuth)},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
 }
 
 async function getAnyTripId() {
@@ -135,9 +120,6 @@ before(async () => {
   redisAuth = parsed && parsed.password
     ? { username: parsed.username || null, password: parsed.password }
     : null;
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'B',location:'lockPaymentE2E.test.js:86',message:'before parseRedisUrl',data:{parsedOk:Boolean(parsed),host:parsed?.host,port:parsed?.port,hasUsername:Boolean(parsed?.username),hasPassword:Boolean(parsed?.password)},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   client = parsed
     ? createClient({
         socket: {
@@ -147,19 +129,10 @@ before(async () => {
       })
     : createClient({ url: REDIS_URL });
   client.on('error', (error) => {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'C',location:'lockPaymentE2E.test.js:103',message:'redis client error',data:{name:error?.name,message:error?.message},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
   });
   client.on('reconnecting', () => {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'C',location:'lockPaymentE2E.test.js:108',message:'redis client reconnecting',data:{},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
   });
   client.on('end', () => {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'C',location:'lockPaymentE2E.test.js:113',message:'redis client end',data:{},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
   });
   await ensureClientReady();
 });
@@ -174,17 +147,11 @@ after(async () => {
 });
 
 beforeEach(async () => {
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'D',location:'lockPaymentE2E.test.js:121',message:'beforeEach start',data:{hasRedisAuth:Boolean(redisAuth),isOpen:client?.isOpen,isReady:client?.isReady},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   await ensureClientReady();
   await resetBookingData();
   try {
     await client.flushDb();
   } catch (error) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'D',location:'lockPaymentE2E.test.js:129',message:'beforeEach flushDb error',data:{name:error?.name,message:error?.message},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     throw error;
   }
 });
@@ -193,9 +160,6 @@ test('E2E: lock -> payment fail -> release -> rebook succeeds', async () => {
   const tripId = await getAnyTripId();
   const trip = await tripModel.findById(tripId);
   const lockKey = `lock:trip:${trip.id}:seat:1`;
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'F',location:'lockPaymentE2E.test.js:129',message:'pre-test bookings snapshot',data:{tripId,counts:(await bookingModel.findByTripId(tripId)).reduce((acc,booking)=>{acc.total+=1;acc[booking.status]=(acc[booking.status]||0)+1;return acc;},{total:0})},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
 
   const sessionA = `sess_a_${Date.now()}`;
   const sessionB = `sess_b_${Date.now()}`;
@@ -220,9 +184,6 @@ test('E2E: lock -> payment fail -> release -> rebook succeeds', async () => {
   try {
     acquireB = await lockService.execute('ACQUIRE', lockKey, sessionB, 30);
   } catch (error) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'E',location:'lockPaymentE2E.test.js:150',message:'acquireB error',data:{name:error?.name,message:error?.message},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     throw error;
   }
   assert.strictEqual(acquireB, STATUS.LOCKED_BY_OTHER);
@@ -238,9 +199,6 @@ test('E2E: lock -> payment fail -> release -> rebook succeeds', async () => {
       { redisClient: client }
     );
   } catch (error) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'E',location:'lockPaymentE2E.test.js:163',message:'paymentFail error',data:{name:error?.name,message:error?.message},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     throw error;
   }
   assert.strictEqual(paymentFail.idempotent, false);
@@ -274,9 +232,6 @@ test('E2E: lock -> payment fail -> release -> rebook succeeds', async () => {
       { redisClient: client }
     );
   } catch (error) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'E',location:'lockPaymentE2E.test.js:196',message:'paymentSuccess error',data:{name:error?.name,message:error?.message},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     throw error;
   }
   assert.strictEqual(paymentSuccess.idempotent, false);
@@ -287,9 +242,6 @@ test('E2E: lock -> payment fail -> release -> rebook succeeds', async () => {
 
   const allBookings = await bookingModel.findByTripId(tripId);
   const confirmed = allBookings.filter((booking) => booking.status === 'confirmed');
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'debug-session',runId:'pre-fix',hypothesisId:'F',location:'lockPaymentE2E.test.js:265',message:'pre-assert bookings snapshot',data:{tripId,counts:allBookings.reduce((acc,booking)=>{acc.total+=1;acc[booking.status]=(acc[booking.status]||0)+1;return acc;},{total:0}),confirmedCount:confirmed.length},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   assert.strictEqual(confirmed.length, 1);
   assert.strictEqual(confirmed[0].id, bookingB.id);
 

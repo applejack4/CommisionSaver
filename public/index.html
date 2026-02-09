@@ -424,22 +424,171 @@
         </div>
     </div>
 
+    <!-- TODO: Uncomment these script tags once src/ modules are loaded via HTML -->
+    <!-- <script src="/src/config/api.js"></script> -->
+    <!-- <script src="/src/core/operator.js"></script> -->
+    <!-- <script src="/src/core/apiFetch.js"></script> -->
     <script>
-        const API_BASE = window.location.origin;
-        const POLL_INTERVALS = {
-            sessions: 20000,
-            sessionDetail: 12000,
-            messages: 5000,
-            booking: 20000
-        };
-        const state = {
+        // ── Resolve from extracted modules (window.CS) or use inline fallbacks ──
+        var _cs     = window.CS || {};
+        var _cfg    = (_cs.config   || {});
+        var _op     = (_cs.operator || {});
+        var _api    = (_cs.api      || {});
+
+        var API_BASE            = _cfg.API_BASE            || window.location.origin;
+        var POLL_INTERVALS      = _cfg.POLL_INTERVALS      || Object.freeze({ sessions: 10000, sessionDetail: 5000, messages: 5000, booking: 5000 });
+        var MAX_ACTION_RETRIES  = _cfg.MAX_ACTION_RETRIES  || 3;
+        var RETRY_BASE_DELAY_MS = _cfg.RETRY_BASE_DELAY_MS || 1000;
+
+        var state = {
             activeTab: 'sessions',
             currentSessionId: null,
             currentBookingId: null,
             sessionsPoll: null,
             sessionDetailPoll: null,
             messagesPoll: null,
-            bookingPoll: null
+            bookingPoll: null,
+            countdownInterval: null,
+            actionInFlight: false
+        };
+
+        // ── Operator Identity (delegates to module or inline) ──
+        var getOperatorId = _op.getId || function () {
+            var id = localStorage.getItem('operator_id');
+            if (!id) {
+                id = prompt('Enter your Operator ID:');
+                if (id && id.trim()) localStorage.setItem('operator_id', id.trim());
+            }
+            return id ? id.trim() : null;
+        };
+
+        // ── Idempotency (delegates to module or inline) ──
+        var generateIdempotencyKey = _api.generateIdempotencyKey || function () {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+                var r = (Math.random() * 16) | 0;
+                var v = c === 'x' ? r : (r & 0x3) | 0x8;
+                return v.toString(16);
+            });
+        };
+
+        function sleep(ms) {
+            return new Promise(function (resolve) { setTimeout(resolve, ms); });
+        }
+
+        // ── Countdown helpers ──────────────────────────
+        function formatCountdown(ms) {
+            if (ms <= 0) return 'EXPIRED';
+            var totalSeconds = Math.floor(ms / 1000);
+            var minutes = Math.floor(totalSeconds / 60);
+            var seconds = totalSeconds % 60;
+            return minutes + 'm ' + seconds.toString().padStart(2, '0') + 's';
+        }
+
+        function startLockCountdown(lockExpiresAt) {
+            stopLockCountdown();
+            if (!lockExpiresAt) return;
+            var expiresMs = new Date(lockExpiresAt).getTime();
+            if (Number.isNaN(expiresMs)) return;
+
+            function tick() {
+                var el = document.getElementById('lock-countdown');
+                if (!el) { stopLockCountdown(); return; }
+                var remaining = expiresMs - Date.now();
+                el.textContent = formatCountdown(remaining);
+                var bookingSummary = document.getElementById('booking-summary');
+                if (bookingSummary) {
+                    if (remaining > 0 && remaining < 5 * 60 * 1000) {
+                        bookingSummary.style.border = '2px solid #f59e0b';
+                        bookingSummary.style.borderRadius = '8px';
+                    } else if (remaining <= 0) {
+                        bookingSummary.style.border = '2px solid #ef4444';
+                        bookingSummary.style.borderRadius = '8px';
+                    } else {
+                        bookingSummary.style.border = '';
+                        bookingSummary.style.borderRadius = '';
+                    }
+                }
+            }
+            tick();
+            state.countdownInterval = setInterval(tick, 1000);
+        }
+
+        function stopLockCountdown() {
+            if (state.countdownInterval) {
+                clearInterval(state.countdownInterval);
+                state.countdownInterval = null;
+            }
+        }
+
+        // ── Banner (delegates to module or inline) ──
+        // TODO: Add a dedicated banner container element in the HTML for action feedback
+        var showBanner = _api.showBanner || function (message, type) {
+            var detail = document.getElementById('session-detail');
+            if (!detail) return;
+            detail.querySelectorAll('.action-banner').forEach(function (b) { b.remove(); });
+            var className = type === 'success' ? 'success' : 'error';
+            var banner = document.createElement('div');
+            banner.className = className + ' action-banner';
+            banner.style.marginBottom = '10px';
+            banner.textContent = message;
+            detail.prepend(banner);
+            setTimeout(function () { banner.remove(); }, 5000);
+        };
+
+        // ── Action Fetch (delegates to module or inline) ──
+        var actionFetch = _api.actionFetch || async function (url, opts) {
+            var method = (opts && opts.method) || 'POST';
+            var body = (opts && opts.body) || null;
+            var operatorId = getOperatorId();
+            if (!operatorId) {
+                showBanner('Operator ID is required.', 'error');
+                throw new Error('OPERATOR_ID_REQUIRED');
+            }
+            var idempotencyKey = generateIdempotencyKey();
+
+            for (var attempt = 0; attempt <= MAX_ACTION_RETRIES; attempt++) {
+                try {
+                    var response = await fetch(url, {
+                        method: method,
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Idempotency-Key': idempotencyKey,
+                            'x-operator-id': operatorId
+                        },
+                        body: body ? JSON.stringify(body) : undefined
+                    });
+
+                    var data = null;
+                    try { data = await response.json(); } catch (e) {
+                        throw new Error('Invalid server response');
+                    }
+
+                    if ((response.status === 409 || response.status === 503) && attempt < MAX_ACTION_RETRIES) {
+                        showBanner('Temporary issue — retrying…', 'warning');
+                        await sleep(RETRY_BASE_DELAY_MS * Math.pow(2, attempt));
+                        continue;
+                    }
+                    if (response.status === 403) {
+                        showBanner("You don't have access to this booking", 'error');
+                        return null;
+                    }
+                    if (response.status === 429) {
+                        showBanner('Rate limit reached. Please wait a moment.', 'warning');
+                        return null;
+                    }
+                    if (!response.ok || (data && data.success === false)) {
+                        throw new Error((data && data.error) || 'Action failed');
+                    }
+                    return data;
+                } catch (error) {
+                    if (attempt >= MAX_ACTION_RETRIES) {
+                        showBanner('Action failed after retries: ' + error.message, 'error');
+                        throw error;
+                    }
+                    showBanner('Temporary issue — retrying…', 'warning');
+                    await sleep(RETRY_BASE_DELAY_MS * Math.pow(2, attempt));
+                }
+            }
         };
 
         // Set default date to tomorrow
@@ -512,19 +661,37 @@
             return bookingId;
         }
 
-        async function fetchJson(url) {
-            const response = await fetch(url);
-            let data = null;
+        // ── fetchJson (delegates to module or inline) ──
+        var fetchJson = _api.fetchJson || async function (url) {
+            var operatorId = getOperatorId();
+            var fetchUrl = new URL(url, window.location.origin);
+            if (operatorId && !fetchUrl.searchParams.has('operator_id')) {
+                fetchUrl.searchParams.set('operator_id', operatorId);
+            }
+            var headers = {};
+            if (operatorId) headers['x-operator-id'] = operatorId;
+
+            var response = await fetch(fetchUrl.toString(), { headers: headers });
+            var data = null;
             try {
                 data = await response.json();
             } catch (error) {
                 throw new Error('Invalid server response');
             }
+            if (response.status === 403) {
+                throw { code: 'FORBIDDEN', message: (data && data.error) || "You don't have access to this booking", status: 403 };
+            }
+            if (response.status === 429) {
+                throw { code: 'RATE_LIMITED', message: 'Rate limit exceeded. Please wait.', status: 429 };
+            }
+            if (response.status === 503 || response.status === 409) {
+                throw { code: 'RETRY_LATER', message: (data && data.error) || 'Temporary issue', status: response.status };
+            }
             if (!response.ok || !data || data.success === false) {
-                throw new Error(data?.error || 'Request failed');
+                throw new Error((data && data.error) || 'Request failed');
             }
             return data;
-        }
+        };
 
         function highlightSelectedSession() {
             const sessionItems = document.querySelectorAll('.session-item');
@@ -538,19 +705,39 @@
         }
 
         async function loadSessions() {
-            const listElement = document.getElementById('sessions-list');
+            var listElement = document.getElementById('sessions-list');
+            // Only show loading spinner on first load, not poll refreshes
+            if (!listElement.querySelector('.session-item')) {
             renderLoading(listElement, 'Loading sessions...');
+            }
 
-            const searchValue = document.getElementById('session-search').value.trim();
-            const statusValue = document.getElementById('session-status').value;
-            const url = new URL(`${API_BASE}/operator/sessions`);
+            var operatorId = getOperatorId();
+            if (!operatorId) {
+                renderError(listElement, 'Operator ID required. Please reload.');
+                return;
+            }
+
+            var searchValue = document.getElementById('session-search').value.trim();
+            var statusValue = document.getElementById('session-status').value;
+            var url = new URL(API_BASE + '/operator/sessions');
+            url.searchParams.set('operator_id', operatorId);
             url.searchParams.set('limit', '50');
             if (searchValue) url.searchParams.set('search', searchValue);
-            if (statusValue) url.searchParams.set('status', statusValue);
+            // "needs_attention" is a client-side filter; pass "active"/"closed" to backend
+            if (statusValue && statusValue !== 'needs_attention') {
+                url.searchParams.set('status', statusValue);
+            }
 
             try {
-                const data = await fetchJson(url.toString());
-                const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+                var data = await fetchJson(url.toString());
+                var sessions = Array.isArray(data.sessions) ? data.sessions : [];
+
+                // Client-side filter for "needs_attention"
+                if (statusValue === 'needs_attention') {
+                    sessions = sessions.filter(function (s) {
+                        return s.payment_status === 'FAILED' || s.requires_action;
+                    });
+                }
 
                 if (!sessions.length) {
                     state.currentSessionId = null;
@@ -560,37 +747,51 @@
                     return;
                 }
 
-                listElement.innerHTML = sessions.map(session => {
-                    const displayName = session.customer_name
-                        ? `${session.customer_name} (${session.customer_phone || 'Unknown'})`
+                listElement.innerHTML = sessions.map(function (session) {
+                    var displayName = session.customer_name
+                        ? session.customer_name + ' (' + (session.customer_phone || 'Unknown') + ')'
                         : (session.customer_phone || 'Unknown customer');
-                    const requiresAction = session.requires_action ? 'Action required' : '';
-                    return `
-                        <div class="session-item" data-session-id="${escapeHtml(session.session_id)}" data-booking-id="${escapeHtml(session.booking_id || '')}">
-                            <strong>${escapeHtml(displayName)}</strong>
-                            <div style="font-size: 12px; color: #666; margin-top: 4px;">
-                                ${escapeHtml(session.last_message_excerpt || 'No recent messages')}
-                            </div>
-                            <div class="session-meta">
-                                <span>${formatDateTime(session.last_message_at)}</span>
-                                <span class="pill">${escapeHtml(session.conversation_state || 'UNKNOWN')}</span>
-                            </div>
-                            <div class="session-meta">
-                                <span>${escapeHtml(session.booking_state || 'No booking')}</span>
-                                <span>${escapeHtml(requiresAction)}</span>
-                            </div>
-                        </div>
-                    `;
+
+                    // State-derived: payment_status FAILED → alert border + requires attention
+                    var needsAttention = session.payment_status === 'FAILED' || session.requires_action;
+                    var requiresActionText = needsAttention ? 'Action required' : '';
+                    var alertBorder = needsAttention ? 'border-left: 3px solid #ef4444;' : '';
+
+                    // State-derived: takeover indicator
+                    var takeoverBadge = session.takeover_status === 'ACTIVE'
+                        ? ' <span class="pill" style="background:#dbeafe;color:#1e40af;">Taken Over</span>'
+                        : '';
+
+                    return '<div class="session-item" data-session-id="' + escapeHtml(session.session_id) + '" data-booking-id="' + escapeHtml(session.booking_id || '') + '" style="' + alertBorder + '">'
+                        + '<strong>' + escapeHtml(displayName) + '</strong>'
+                        + '<div style="font-size: 12px; color: #666; margin-top: 4px;">'
+                        + escapeHtml(session.last_message_excerpt || 'No recent messages')
+                        + '</div>'
+                        + '<div class="session-meta">'
+                        + '<span>' + formatDateTime(session.last_message_at) + '</span>'
+                        + '<span class="pill">' + escapeHtml(session.conversation_state || 'UNKNOWN') + '</span>'
+                        + '</div>'
+                        + '<div class="session-meta">'
+                        + '<span>' + escapeHtml(session.booking_state || 'No booking') + '</span>'
+                        + '<span>' + takeoverBadge + escapeHtml(requiresActionText) + '</span>'
+                        + '</div>'
+                        + '</div>';
                 }).join('');
 
-                if (!state.currentSessionId || !sessions.find(session => session.session_id === state.currentSessionId)) {
+                if (!state.currentSessionId || !sessions.find(function (s) { return s.session_id === state.currentSessionId; })) {
                     selectSession(sessions[0].session_id, sessions[0].booking_id);
                 } else {
                     highlightSelectedSession();
                 }
             } catch (error) {
                 console.error('Error loading sessions:', error);
+                if (error.status === 429) {
+                    renderError(listElement, 'Rate limited. Please wait and try again.');
+                } else if (error.code === 'FORBIDDEN') {
+                    renderError(listElement, "You don't have access. Check your Operator ID.");
+                } else {
                 renderError(listElement, 'Error loading sessions. Please refresh.');
+                }
             }
         }
 
@@ -608,80 +809,122 @@
             state.currentSessionId = null;
             state.currentBookingId = null;
             stopSessionPolling();
+            stopLockCountdown();
             highlightSelectedSession();
             renderLoading(document.getElementById('session-detail'), 'Select a session to view details.');
         }
 
         function renderSessionDetail(data) {
-            const detailElement = document.getElementById('session-detail');
-            const session = data.session || {};
-            const booking = data.booking || null;
-            const payment = data.payment || null;
+            var detailElement = document.getElementById('session-detail');
+            var session = data.session || {};
+            var booking = data.booking || null;
+            var payment = data.payment || null;
+            var sessionId = session.session_id || '';
 
-            detailElement.innerHTML = `
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <h3>Session Detail</h3>
-                    <div style="display: flex; gap: 8px; align-items: center;">
-                        <span class="pill">${escapeHtml(session.takeover_status || 'UNKNOWN')}</span>
-                        <button type="button" onclick="clearSessionSelection()">Close</button>
-                    </div>
-                </div>
-                <div class="detail-grid" id="session-summary">
-                    <div class="detail-item"><strong>Session ID:</strong> ${escapeHtml(session.session_id || '—')}</div>
-                    <div class="detail-item"><strong>Customer:</strong> ${escapeHtml(session.customer_name || '—')}</div>
-                    <div class="detail-item"><strong>Phone:</strong> ${escapeHtml(session.customer_phone || '—')}</div>
-                    <div class="detail-item"><strong>State:</strong> ${escapeHtml(session.conversation_state || '—')}</div>
-                    <div class="detail-item"><strong>Last Msg:</strong> ${formatDateTime(session.last_message_at)}</div>
-                </div>
+            // ── Takeover action buttons (state-derived) ──
+            var takeoverHtml = '';
+            var ts = session.takeover_status || 'AVAILABLE';
+            if (ts === 'AVAILABLE') {
+                takeoverHtml = '<button type="button" id="btn-takeover" onclick="handleTakeover()">Take Over</button>';
+            } else if (ts === 'ACTIVE') {
+                takeoverHtml = '<span class="pill" style="background:#dbeafe;color:#1e40af;">Operator: ' + escapeHtml(session.assigned_operator_id || '—') + '</span> '
+                    + '<button type="button" id="btn-release" onclick="handleReleaseTakeover()">Release</button>';
+            } else if (ts === 'RELEASED') {
+                takeoverHtml = '<button type="button" id="btn-resume" onclick="handleResumeTakeover()">Resume</button> '
+                    + '<span class="pill" style="background:#f1f5f9;color:#94a3b8;">Released</span>';
+            }
 
-                <h4 style="margin-top: 15px;">Booking Summary</h4>
-                ${booking ? `
-                    <div class="detail-grid" id="booking-summary">
-                        <div class="detail-item"><strong>Booking:</strong> ${escapeHtml(booking.booking_id || '—')}</div>
-                        <div class="detail-item"><strong>Status:</strong> ${escapeHtml(booking.booking_state || '—')}</div>
-                        <div class="detail-item"><strong>Seats:</strong> ${escapeHtml(booking.seat_count ?? '—')}</div>
-                        <div class="detail-item"><strong>Route:</strong> ${escapeHtml(booking.route_label || '—')}</div>
-                        <div class="detail-item"><strong>Date:</strong> ${escapeHtml(booking.journey_date || '—')}</div>
-                        <div class="detail-item"><strong>Time:</strong> ${escapeHtml(booking.departure_time || '—')}</div>
-                        <div class="detail-item"><strong>Price:</strong> ${formatCurrency(booking.price_amount, booking.price_currency)}</div>
-                        <div class="detail-item"><strong>Lock Expires:</strong> ${formatDateTime(booking.lock_expires_at)}</div>
-                    </div>
-                ` : '<div class="loading">No booking attached to this session.</div>'}
+            // ── Lock countdown (state-derived for booking_state LOCKED) ──
+            var countdownHtml = '';
+            if (booking && booking.booking_state === 'LOCKED' && booking.lock_expires_at) {
+                countdownHtml = '<div class="detail-item" style="font-weight:600;"><strong>Lock Countdown:</strong> <span id="lock-countdown">…</span></div>';
+            }
 
-                <h4 style="margin-top: 15px;">Payment Summary</h4>
-                ${payment ? `
-                    <div class="detail-grid" id="payment-summary">
-                        <div class="detail-item"><strong>Status:</strong> ${escapeHtml(payment.status || '—')}</div>
-                        <div class="detail-item"><strong>Gateway Ref:</strong> ${escapeHtml(payment.gateway_ref || '—')}</div>
-                        <div class="detail-item"><strong>Pay Link:</strong> ${payment.pay_link_url ? `<a href="${escapeHtml(payment.pay_link_url)}" target="_blank">Open</a>` : '—'}</div>
-                        <div class="detail-item"><strong>Link Expires:</strong> ${formatDateTime(payment.pay_link_expires_at)}</div>
-                        <div class="detail-item"><strong>Last Event:</strong> ${formatDateTime(payment.last_event_at)}</div>
-                    </div>
-                ` : '<div class="loading">No payment data.</div>'}
+            // ── Payment alert (state-derived) ──
+            var paymentAlertStyle = '';
+            if (payment && payment.status === 'FAILED') {
+                paymentAlertStyle = 'border-left: 3px solid #ef4444; padding-left: 8px;';
+            }
 
-                <h4 style="margin-top: 15px;">Full Booking Detail</h4>
-                <div id="booking-detail" class="detail-grid">
-                    <div class="loading">Loading booking detail...</div>
-                </div>
+            // ── Cancel button (only for CONFIRMED bookings) ──
+            var cancelHtml = '';
+            if (booking && booking.booking_state === 'CONFIRMED') {
+                cancelHtml = '<button type="button" id="btn-cancel" style="background:#ef4444;margin-top:10px;" onclick="handleCancelBooking()">Cancel Booking</button>';
+            }
 
-                <h4 style="margin-top: 15px;">Messages</h4>
-                <div id="messages-list" class="message-list">
-                    <div class="loading">Loading messages...</div>
-                </div>
-            `;
+            detailElement.innerHTML = ''
+                + '<div style="display: flex; justify-content: space-between; align-items: center;">'
+                + '    <h3>Session Detail</h3>'
+                + '    <div style="display: flex; gap: 8px; align-items: center;">'
+                + '        <span class="pill">' + escapeHtml(ts) + '</span>'
+                + '        ' + takeoverHtml
+                + '        <button type="button" onclick="clearSessionSelection()">Close</button>'
+                + '    </div>'
+                + '</div>'
+                + '<div class="detail-grid" id="session-summary">'
+                + '    <div class="detail-item"><strong>Session ID:</strong> ' + escapeHtml(session.session_id || '—') + '</div>'
+                + '    <div class="detail-item"><strong>Customer:</strong> ' + escapeHtml(session.customer_name || '—') + '</div>'
+                + '    <div class="detail-item"><strong>Phone:</strong> ' + escapeHtml(session.customer_phone || '—') + '</div>'
+                + '    <div class="detail-item"><strong>State:</strong> ' + escapeHtml(session.conversation_state || '—') + '</div>'
+                + '    <div class="detail-item"><strong>Last Msg:</strong> ' + formatDateTime(session.last_message_at) + '</div>'
+                + '</div>'
+                + '<h4 style="margin-top: 15px;">Booking Summary</h4>'
+                + (booking
+                    ? '<div class="detail-grid" id="booking-summary">'
+                      + '<div class="detail-item"><strong>Booking:</strong> ' + escapeHtml(booking.booking_id || '—') + '</div>'
+                      + '<div class="detail-item"><strong>Status:</strong> ' + escapeHtml(booking.booking_state || '—') + '</div>'
+                      + '<div class="detail-item"><strong>Seats:</strong> ' + escapeHtml(booking.seat_count != null ? booking.seat_count : '—') + '</div>'
+                      + '<div class="detail-item"><strong>Route:</strong> ' + escapeHtml(booking.route_label || '—') + '</div>'
+                      + '<div class="detail-item"><strong>Date:</strong> ' + escapeHtml(booking.journey_date || '—') + '</div>'
+                      + '<div class="detail-item"><strong>Time:</strong> ' + escapeHtml(booking.departure_time || '—') + '</div>'
+                      + '<div class="detail-item"><strong>Price:</strong> ' + formatCurrency(booking.price_amount, booking.price_currency) + '</div>'
+                      + '<div class="detail-item"><strong>Lock Expires:</strong> ' + formatDateTime(booking.lock_expires_at) + '</div>'
+                      + countdownHtml
+                      + '</div>'
+                      + cancelHtml
+                    : '<div class="loading">No booking attached to this session.</div>')
+                + '<h4 style="margin-top: 15px;">Payment Summary</h4>'
+                + (payment
+                    ? '<div class="detail-grid" id="payment-summary" style="' + paymentAlertStyle + '">'
+                      + '<div class="detail-item"><strong>Status:</strong> ' + escapeHtml(payment.status || '—') + '</div>'
+                      + '<div class="detail-item"><strong>Gateway Ref:</strong> ' + escapeHtml(payment.gateway_ref || '—') + '</div>'
+                      + '<div class="detail-item"><strong>Pay Link:</strong> ' + (payment.pay_link_url ? '<a href="' + escapeHtml(payment.pay_link_url) + '" target="_blank">Open</a>' : '—') + '</div>'
+                      + '<div class="detail-item"><strong>Link Expires:</strong> ' + formatDateTime(payment.pay_link_expires_at) + '</div>'
+                      + '<div class="detail-item"><strong>Last Event:</strong> ' + formatDateTime(payment.last_event_at) + '</div>'
+                      + '</div>'
+                    : '<div class="loading">No payment data.</div>')
+                + '<h4 style="margin-top: 15px;">Full Booking Detail</h4>'
+                + '<div id="booking-detail" class="detail-grid">'
+                + '    <div class="loading">Loading booking detail...</div>'
+                + '</div>'
+                + '<h4 style="margin-top: 15px;">Messages</h4>'
+                + '<div id="messages-list" class="message-list">'
+                + '    <div class="loading">Loading messages...</div>'
+                + '</div>';
+
+            // Start countdown if booking is LOCKED
+            if (booking && booking.booking_state === 'LOCKED' && booking.lock_expires_at) {
+                startLockCountdown(booking.lock_expires_at);
+            } else {
+                stopLockCountdown();
+            }
         }
 
         async function loadSessionDetail() {
-            const sessionId = state.currentSessionId;
+            var sessionId = state.currentSessionId;
             if (!sessionId) return;
 
-            const detailElement = document.getElementById('session-detail');
+            var detailElement = document.getElementById('session-detail');
+            // Only show loading on first render, not poll refreshes
+            if (!detailElement.querySelector('#session-summary')) {
             renderLoading(detailElement, 'Loading session details...');
+            }
 
             try {
-                const data = await fetchJson(`${API_BASE}/operator/sessions/${encodeURIComponent(sessionId)}`);
+                var data = await fetchJson(API_BASE + '/operator/sessions/' + encodeURIComponent(sessionId));
+                state.lastDetailData = data; // cache for action handlers
                 renderSessionDetail(data);
-                const bookingId = data.booking?.booking_id || null;
+                var bookingId = (data.booking && data.booking.booking_id) || null;
                 if (bookingId && bookingId !== state.currentBookingId) {
                     state.currentBookingId = bookingId;
                 }
@@ -689,42 +932,45 @@
                 if (state.currentBookingId) {
                     loadBookingDetail(state.currentBookingId);
                 } else {
-                    const bookingDetail = document.getElementById('booking-detail');
+                    var bookingDetail = document.getElementById('booking-detail');
                     if (bookingDetail) {
                         bookingDetail.innerHTML = '<div class="loading">No booking detail available.</div>';
                     }
                 }
             } catch (error) {
                 console.error('Error loading session detail:', error);
+                if (error.code === 'FORBIDDEN') {
+                    renderError(detailElement, "You don't have access to this booking.");
+                } else if (error.status === 429) {
+                    renderError(detailElement, 'Rate limited. Please wait.');
+                } else {
                 renderError(detailElement, 'Error loading session details.');
+                }
             }
         }
 
         async function loadSessionMessages() {
-            const sessionId = state.currentSessionId;
+            var sessionId = state.currentSessionId;
             if (!sessionId) return;
 
-            const messagesElement = document.getElementById('messages-list');
-            if (messagesElement) {
-                renderLoading(messagesElement, 'Loading messages...');
-            }
+            var messagesElement = document.getElementById('messages-list');
+            if (!messagesElement) return;
 
             try {
-                const data = await fetchJson(`${API_BASE}/operator/sessions/${encodeURIComponent(sessionId)}/messages?limit=50`);
-                const messages = Array.isArray(data.messages) ? data.messages : [];
-                if (!messagesElement) return;
+                var data = await fetchJson(API_BASE + '/operator/sessions/' + encodeURIComponent(sessionId) + '/messages?limit=50');
+                var messages = Array.isArray(data.messages) ? data.messages : [];
                 if (!messages.length) {
                     messagesElement.innerHTML = '<div class="loading">No messages yet.</div>';
                     return;
                 }
-                messagesElement.innerHTML = messages.map(message => `
-                    <div class="message-item ${message.direction === 'OUTBOUND' ? 'message-outbound' : 'message-inbound'}">
-                        <div>${escapeHtml(message.text || '[non-text message]')}</div>
-                        <div style="font-size: 11px; color: #64748b; margin-top: 4px;">
-                            ${formatDateTime(message.timestamp)} · ${escapeHtml(message.status || 'UNKNOWN')}
-                        </div>
-                    </div>
-                `).join('');
+                messagesElement.innerHTML = messages.map(function (message) {
+                    var dirClass = message.direction === 'OUTBOUND' ? 'message-outbound' : 'message-inbound';
+                    return '<div class="message-item ' + dirClass + '">'
+                        + '<div>' + escapeHtml(message.text || '[non-text message]') + '</div>'
+                        + '<div style="font-size: 11px; color: #64748b; margin-top: 4px;">'
+                        + formatDateTime(message.timestamp) + ' · ' + escapeHtml(message.status || 'UNKNOWN')
+                        + '</div></div>';
+                }).join('');
             } catch (error) {
                 console.error('Error loading session messages:', error);
                 if (messagesElement) {
@@ -734,8 +980,8 @@
         }
 
         async function loadBookingDetail(bookingId) {
-            const normalizedId = normalizeBookingId(bookingId);
-            const bookingElement = document.getElementById('booking-detail');
+            var normalizedId = normalizeBookingId(bookingId);
+            var bookingElement = document.getElementById('booking-detail');
             if (!bookingElement) return;
 
             if (!normalizedId) {
@@ -744,28 +990,31 @@
             }
 
             try {
-                const data = await fetchJson(`${API_BASE}/operator/bookings/${encodeURIComponent(normalizedId)}`);
-                const booking = data.booking || {};
-                bookingElement.innerHTML = `
-                    <div class="detail-item"><strong>Booking ID:</strong> ${escapeHtml(booking.booking_id || '—')}</div>
-                    <div class="detail-item"><strong>Session ID:</strong> ${escapeHtml(booking.session_id || '—')}</div>
-                    <div class="detail-item"><strong>Status:</strong> ${escapeHtml(booking.booking_state || '—')}</div>
-                    <div class="detail-item"><strong>Seats:</strong> ${escapeHtml(booking.seat_count ?? '—')}</div>
-                    <div class="detail-item"><strong>Customer Phone:</strong> ${escapeHtml(booking.customer_phone || '—')}</div>
-                    <div class="detail-item"><strong>Trip ID:</strong> ${escapeHtml(booking.trip_id || '—')}</div>
-                    <div class="detail-item"><strong>Route:</strong> ${escapeHtml(booking.route_label || '—')}</div>
-                    <div class="detail-item"><strong>Date:</strong> ${escapeHtml(booking.journey_date || '—')}</div>
-                    <div class="detail-item"><strong>Time:</strong> ${escapeHtml(booking.departure_time || '—')}</div>
-                    <div class="detail-item"><strong>Price:</strong> ${formatCurrency(booking.price_amount, booking.price_currency)}</div>
-                    <div class="detail-item"><strong>Lock Key:</strong> ${escapeHtml(booking.lock_key || '—')}</div>
-                    <div class="detail-item"><strong>Lock Expires:</strong> ${formatDateTime(booking.lock_expires_at)}</div>
-                    <div class="detail-item"><strong>Ticket Media ID:</strong> ${escapeHtml(booking.ticket_media_id || '—')}</div>
-                    <div class="detail-item"><strong>Created:</strong> ${formatDateTime(booking.created_at)}</div>
-                    <div class="detail-item"><strong>Updated:</strong> ${formatDateTime(booking.updated_at)}</div>
-                `;
+                var data = await fetchJson(API_BASE + '/operator/bookings/' + encodeURIComponent(normalizedId));
+                var booking = data.booking || {};
+                bookingElement.innerHTML = ''
+                    + '<div class="detail-item"><strong>Booking ID:</strong> ' + escapeHtml(booking.booking_id || '—') + '</div>'
+                    + '<div class="detail-item"><strong>Session ID:</strong> ' + escapeHtml(booking.session_id || '—') + '</div>'
+                    + '<div class="detail-item"><strong>Status:</strong> ' + escapeHtml(booking.booking_state || '—') + '</div>'
+                    + '<div class="detail-item"><strong>Seats:</strong> ' + escapeHtml(booking.seat_count != null ? booking.seat_count : '—') + '</div>'
+                    + '<div class="detail-item"><strong>Customer Phone:</strong> ' + escapeHtml(booking.customer_phone || '—') + '</div>'
+                    + '<div class="detail-item"><strong>Trip ID:</strong> ' + escapeHtml(booking.trip_id || '—') + '</div>'
+                    + '<div class="detail-item"><strong>Route:</strong> ' + escapeHtml(booking.route_label || '—') + '</div>'
+                    + '<div class="detail-item"><strong>Date:</strong> ' + escapeHtml(booking.journey_date || '—') + '</div>'
+                    + '<div class="detail-item"><strong>Time:</strong> ' + escapeHtml(booking.departure_time || '—') + '</div>'
+                    + '<div class="detail-item"><strong>Price:</strong> ' + formatCurrency(booking.price_amount, booking.price_currency) + '</div>'
+                    + '<div class="detail-item"><strong>Lock Key:</strong> ' + escapeHtml(booking.lock_key || '—') + '</div>'
+                    + '<div class="detail-item"><strong>Lock Expires:</strong> ' + formatDateTime(booking.lock_expires_at) + '</div>'
+                    + '<div class="detail-item"><strong>Ticket Media ID:</strong> ' + escapeHtml(booking.ticket_media_id || '—') + '</div>'
+                    + '<div class="detail-item"><strong>Created:</strong> ' + formatDateTime(booking.created_at) + '</div>'
+                    + '<div class="detail-item"><strong>Updated:</strong> ' + formatDateTime(booking.updated_at) + '</div>';
             } catch (error) {
                 console.error('Error loading booking detail:', error);
-                renderError(bookingElement, 'Error loading booking detail.');
+                if (error.code === 'FORBIDDEN') {
+                    renderError(bookingElement, "You don't have access to this booking.");
+                } else {
+                    renderError(bookingElement, 'Error loading booking detail.');
+                }
             }
         }
 
@@ -788,6 +1037,7 @@
             state.sessionDetailPoll = null;
             state.messagesPoll = null;
             state.bookingPoll = null;
+            stopLockCountdown();
         }
 
         function startSessionsListPolling() {
@@ -798,6 +1048,121 @@
         function stopSessionsListPolling() {
             if (state.sessionsPoll) clearInterval(state.sessionsPoll);
             state.sessionsPoll = null;
+        }
+
+        // ── Action Handlers ─────────────────────────────
+        // Wired to buttons rendered in renderSessionDetail
+
+        async function handleTakeover() {
+            var sessionId = state.currentSessionId;
+            var operatorId = getOperatorId();
+            if (!sessionId || !operatorId || state.actionInFlight) return;
+
+            var btn = document.getElementById('btn-takeover');
+            if (btn) btn.disabled = true;
+            state.actionInFlight = true;
+
+            try {
+                var result = await actionFetch(API_BASE + '/operator/sessions/' + encodeURIComponent(sessionId) + '/takeover', {
+                    method: 'POST',
+                    body: { operator_id: operatorId }
+                });
+                if (result && result.success) {
+                    showBanner('Takeover started.', 'success');
+                }
+                await loadSessionDetail();
+                await loadSessions();
+            } catch (error) {
+                console.error('Takeover failed:', error);
+            } finally {
+                state.actionInFlight = false;
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        async function handleReleaseTakeover() {
+            var sessionId = state.currentSessionId;
+            if (!sessionId || state.actionInFlight) return;
+
+            var btn = document.getElementById('btn-release');
+            if (btn) btn.disabled = true;
+            state.actionInFlight = true;
+
+            try {
+                var result = await actionFetch(API_BASE + '/operator/sessions/' + encodeURIComponent(sessionId) + '/takeover', {
+                    method: 'PATCH',
+                    body: { action: 'release' }
+                });
+                if (result && result.success) {
+                    showBanner('Takeover released.', 'success');
+                }
+                await loadSessionDetail();
+                await loadSessions();
+            } catch (error) {
+                console.error('Release failed:', error);
+            } finally {
+                state.actionInFlight = false;
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        async function handleResumeTakeover() {
+            var sessionId = state.currentSessionId;
+            if (!sessionId || state.actionInFlight) return;
+
+            var btn = document.getElementById('btn-resume');
+            if (btn) btn.disabled = true;
+            state.actionInFlight = true;
+
+            try {
+                var result = await actionFetch(API_BASE + '/operator/sessions/' + encodeURIComponent(sessionId) + '/takeover', {
+                    method: 'PATCH',
+                    body: { action: 'resume' }
+                });
+                if (result && result.success) {
+                    showBanner('Takeover resumed.', 'success');
+                }
+                await loadSessionDetail();
+                await loadSessions();
+            } catch (error) {
+                console.error('Resume failed:', error);
+            } finally {
+                state.actionInFlight = false;
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        async function handleCancelBooking() {
+            var bookingId = normalizeBookingId(state.currentBookingId);
+            var operatorId = getOperatorId();
+            if (!bookingId || !operatorId || state.actionInFlight) return;
+
+            if (!confirm('Are you sure you want to cancel this booking?')) return;
+
+            var btn = document.getElementById('btn-cancel');
+            if (btn) btn.disabled = true;
+            state.actionInFlight = true;
+
+            try {
+                var result = await actionFetch(API_BASE + '/bookings/' + encodeURIComponent(bookingId) + '/cancel', {
+                    method: 'POST',
+                    body: {
+                        actor: 'operator',
+                        operator_id: operatorId,
+                        cancellation_reason: 'Cancelled by operator via dashboard'
+                    }
+                });
+                if (result && result.success) {
+                    showBanner('Booking cancelled.' + (result.idempotent ? ' (already cancelled)' : ''), 'success');
+                }
+                await loadSessionDetail();
+                await loadSessions();
+            } catch (error) {
+                console.error('Cancel failed:', error);
+            } finally {
+                state.actionInFlight = false;
+                if (btn) btn.disabled = false;
+            }
         }
 
         async function loadRoutes() {

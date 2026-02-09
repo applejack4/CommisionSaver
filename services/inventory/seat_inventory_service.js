@@ -68,19 +68,10 @@ async function withRedisClient(handler) {
   try {
     parsed = new URL(REDIS_URL);
   } catch (error) {}
-  // #region agent log
-  fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'pre-fix',hypothesisId:'A',location:'seat_inventory_service.js:69',message:'withRedisClient init',data:{hasRedisUrl:Boolean(REDIS_URL),host:parsed?.hostname||null,port:parsed?.port||null,hasUsername:Boolean(parsed?.username),hasPassword:Boolean(parsed?.password)},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   const redisClient = createClient({ url: REDIS_URL });
   try {
     await redisClient.connect();
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'pre-fix',hypothesisId:'A',location:'seat_inventory_service.js:74',message:'withRedisClient connected',data:{isOpen:redisClient.isOpen,isReady:redisClient.isReady},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
   } catch (error) {
-    // #region agent log
-    fetch('http://127.0.0.1:7244/ingest/55a6a436-bb9c-4a9d-bfba-30e3149e9c98',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:'pre-fix',hypothesisId:'B',location:'seat_inventory_service.js:78',message:'withRedisClient connect failed',data:{name:error?.name,message:error?.message},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     throw error;
   }
   try {
